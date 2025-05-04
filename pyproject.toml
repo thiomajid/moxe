@@ -1,0 +1,19 @@
+[project]
+name = "moxe"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "chex>=0.1.89",
+    "datasets>=3.5.1",
+    "einops>=0.8.1",
+    "flax>=0.10.6",
+    "hydra-core>=1.3.2",
+    "jax>=0.6.0",
+    "jaxtyping>=0.3.2",
+    "pillow>=11.2.1",
+    "plotly>=6.0.1",
+    "tensorboard>=2.19.0",
+    "transformers>=4.51.3",
+]
