@@ -1,11 +1,16 @@
 import hashlib
+import logging
 import os
 from typing import Literal, Optional, Union
 
 from datasets import Dataset as HfDataset
 from datasets import IterableDataset, load_dataset, load_from_disk
+from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, DataCollatorForLanguageModeling
+
+from ..config import MoxEConfig
+from .arguments import CustomArgs
 
 
 def get_dataset(
@@ -121,3 +126,73 @@ def get_dataset(
             print(f"Failed to cache tokenized data: {e}")
 
     return tokenized_data
+
+
+def create_dataloaders(
+    logger: logging.Logger,
+    args: CustomArgs,
+    tokenizer: AutoTokenizer,
+    config: MoxEConfig,
+):
+    logger.info(
+        f"Loading training dataset from {args.train_dataset_url} with {args.train_samples} samples"
+    )
+
+    train_dataset = get_dataset(
+        hub_url=args.train_dataset_url,
+        subset=args.train_subset,
+        features=args.features,
+        max_seq_length=config.xlstm.context_length,
+        tokenizer=tokenizer,
+        split=args.train_split,
+        num_samples=args.train_samples,
+        token=args.hub_token,
+        trust_remote_code=args.trust_remote_code,
+    )
+
+    train_dataset.set_format("numpy", columns=["input_ids", "attention_mask", "length"])
+
+    logger.info(
+        f"Loading evaluation dataset from {args.eval_dataset_url} with {args.eval_samples} samples"
+    )
+
+    eval_dataset = get_dataset(
+        hub_url=args.eval_dataset_url,
+        subset=args.eval_subset,
+        features=args.features,
+        max_seq_length=config.xlstm.context_length,
+        tokenizer=tokenizer,
+        split=args.eval_split,
+        num_samples=args.eval_samples,
+        token=args.hub_token,
+        trust_remote_code=args.trust_remote_code,
+    )
+
+    eval_dataset.set_format("numpy", columns=["input_ids", "attention_mask", "length"])
+
+    logger.info("Initializing trainer...")
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False,
+        return_tensors="np",
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.per_device_train_batch_size,
+        collate_fn=data_collator,
+        num_workers=args.dataloader_num_workers,
+        shuffle=True,
+        drop_last=True,  # Important for grad accumulation if dataset size isn't divisible
+    )
+
+    eval_loader = DataLoader(
+        eval_dataset,
+        batch_size=args.per_device_eval_batch_size,
+        collate_fn=data_collator,
+        num_workers=args.dataloader_num_workers,
+        shuffle=False,
+        drop_last=False,
+    )
+
+    return train_loader, eval_loader

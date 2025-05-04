@@ -1,10 +1,17 @@
 import jax
 import jax.numpy as jnp
+import optax
 from flax import nnx
 from jax import lax
 
-from moxe.config import MoxEConfig
-from moxe.output import ConditionedGateOutput
+from ..config import MoxEConfig
+from ..ops import (
+    auxiliary_load_balancing_loss,
+    compute_entropy,
+    kl_auxiliary_group_loss,
+    router_z_loss,
+)
+from ..output import ConditionedGateOutput
 
 
 def _standard_modulation(gamma: float, d_t: jax.Array, _):
@@ -20,6 +27,32 @@ def _proportional_modulation(gamma: float, d_t: jax.Array, difficulty_threshold:
 def _masked_modulation(gamma: float, d_t: jax.Array, difficulty_threshold: float):
     mask = d_t > difficulty_threshold
     return gamma * d_t * mask.astype(d_t.dtype)
+
+
+def _d_loss_computation(unbiased_logits: jax.Array, d_t: jax.Array):
+    router_entropy: jax.Array = compute_entropy(
+        jax.nn.softmax(unbiased_logits, axis=-1),
+        normalize=True,
+    )
+
+    d_t = d_t.reshape(-1)
+    loss = optax.losses.squared_error(predictions=d_t, targets=router_entropy).mean()
+
+    return (loss, d_t.mean(), router_entropy.mean())
+
+
+def _group_wise_loss_computation(
+    router_probs: jax.Array,
+    batch_size: int,
+    seq_len: int,
+    num_experts: int,
+):
+    unflattened_probs = router_probs.reshape(batch_size, seq_len, num_experts)
+    experts_per_group = num_experts // 2
+    mlstm_usage = unflattened_probs[:, :, :experts_per_group].sum(axis=-1).mean()
+    slstm_usage = unflattened_probs[:, :, experts_per_group:].sum(axis=-1).mean()
+
+    return kl_auxiliary_group_loss(pm=mlstm_usage, ps=slstm_usage)
 
 
 class BiasConditionedGate(nnx.Module):
@@ -55,7 +88,12 @@ class BiasConditionedGate(nnx.Module):
             _masked_modulation,
         ]
 
-    def __call__(self, h_t: jnp.ndarray):
+    def __call__(
+        self,
+        h_t: jnp.ndarray,
+        compute_d_loss: bool = True,
+        compute_group_loss: bool = True,
+    ):
         """
         Forward pass
 
@@ -93,14 +131,51 @@ class BiasConditionedGate(nnx.Module):
 
         # (B, S, D) -> (B*S, D)
         flat_h_t = h_t.reshape(-1, hidden_dim)
-        router_raw_logits = self.router(flat_h_t)  # [B*S, num_experts]
+        unbiased_logits = self.router(flat_h_t)  # [B*S, num_experts]
         flat_bias = bias.reshape(-1, self.num_experts)  # [B*S, num_experts]
-        adjusted_logits = router_raw_logits + flat_bias
-        router_probs = jax.nn.softmax(adjusted_logits, axis=-1)  # [B*S, num_experts]
+        adjusted_logits = unbiased_logits + flat_bias
+        router_probs = jax.nn.softmax(adjusted_logits, axis=-1)
+
+        # -------------- Z-loss and load_balancing_loss ----------------
+        z_loss = router_z_loss(unbiased_logits)
+        load_balancing_loss, expert_load, expert_token_counts = (
+            auxiliary_load_balancing_loss(
+                num_experts=self.num_experts,
+                router_probs=router_probs,
+                top_k=self.top_k,
+            )
+        )
+
+        # ------------------- d_loss computation -----------------------
+        d_loss, router_entropy, predicted_entropy = lax.cond(
+            compute_d_loss,
+            lambda: _d_loss_computation(unbiased_logits=unbiased_logits, d_t=d_t),
+            lambda: (jnp.zeros(()),) * 3,
+        )
+
+        # --------------------- group_wise loss ---------------------------------
+        group_loss = lax.cond(
+            compute_group_loss,
+            lambda: _group_wise_loss_computation(
+                router_probs=router_probs,
+                batch_size=batch_size,
+                seq_len=seq_len,
+                num_experts=router_probs.shape[-1],
+            ),
+            lambda: jnp.zeros(()),
+        )
 
         return ConditionedGateOutput(
-            d_t=d_t,
+            unbiased_logits=unbiased_logits,
             probabilities=router_probs,
-            unbiased_logits=router_raw_logits,
             bias=bias,
+            d_t=d_t,
+            z_loss=z_loss,
+            load_balancing_loss=load_balancing_loss,
+            router_entropy=router_entropy,
+            predicted_entropy=predicted_entropy,
+            expert_load=expert_load,
+            expert_token_counts=expert_token_counts,
+            d_loss=d_loss,
+            group_loss=group_loss,
         )

@@ -6,6 +6,7 @@ from einops import rearrange
 from flax import nnx
 from jax import lax
 
+from moxe.ops import auxiliary_load_balancing_loss, router_z_loss
 from xlstm_jax.xlstm_block_stack import xLSTMBlockStack
 
 from ..config import MoxEConfig
@@ -22,6 +23,7 @@ class MoxELayer(nnx.Module):
         self.num_experts = config.num_experts
         self.top_k = config.top_k_experts
         self.gamma = config.gamma
+        self.router_type = config.router_type
 
         mixer_config = deepcopy(config.xlstm)
         mixer_config.num_blocks = 2
@@ -65,8 +67,8 @@ class MoxELayer(nnx.Module):
         else:
             router_logits = self.gate(h_t)
 
-        routing_weights = jax.nn.softmax(router_logits, axis=-1)
-        expert_weights, expert_indices = lax.top_k(routing_weights, self.top_k)
+        router_probs = jax.nn.softmax(router_logits, axis=-1)
+        expert_weights, expert_indices = lax.top_k(router_probs, self.top_k)
 
         expert_weights = expert_weights / jnp.sum(
             expert_weights, axis=-1, keepdims=True
@@ -101,21 +103,46 @@ class MoxELayer(nnx.Module):
             expert_output = expert_layer(current_state)  # (num_selected, 1, D)
             expert_output = jnp.squeeze(expert_output, axis=1)  # (num_selected, D)
 
-            weighted_output = expert_output * routing_weights[top_x, idx, None]
+            weighted_output = expert_output * router_probs[top_x, idx, None]
             weighted_output = expert_output * jnp.expand_dims(
-                routing_weights[top_x, idx], axis=-1
+                router_probs[top_x, idx], axis=-1
             )
 
             # Accumulate results
             final_hidden_states = final_hidden_states.at[top_x].add(weighted_output)
 
         # reshape back to 3D
-        final_hidden_states = final_hidden_states.view(
+        final_hidden_states = final_hidden_states.reshape(
             batch_size, sequence_length, hidden_dim
+        )
+
+        z_loss = lax.cond(
+            self.router_type == SparsityGateType.STANDARD,
+            lambda: router_z_loss(router_logits),
+            lambda: gate_output.z_loss,
+        )
+
+        load_balancing_loss, expert_load, expert_token_counts = lax.cond(
+            self.router_type == SparsityGateType.STANDARD,
+            lambda: auxiliary_load_balancing_loss(
+                num_experts=self.num_experts,
+                router_probs=router_probs,
+                top_k=self.top_k,
+            ),
+            lambda: (
+                gate_output.load_balancing_loss,
+                gate_output.expert_load,
+                gate_output.expert_token_counts,
+            ),
         )
 
         return MoxELayerOutput(
             router_logits=router_logits,
+            router_probs=router_probs,
             hidden_states=final_hidden_states,
             conditioned_output=gate_output,
+            z_loss=z_loss,
+            load_balancing_loss=load_balancing_loss,
+            expert_load=expert_load,
+            expert_token_counts=expert_token_counts,
         )

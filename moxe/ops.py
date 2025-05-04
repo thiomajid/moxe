@@ -132,7 +132,7 @@ def js_auxiliary_group_loss(pm: jax.Array, ps: jax.Array, eps: float = 1e-8):
 
 
 @jax.jit
-def router_z_loss(router_raw_logits: jax.Array):
+def router_z_loss(router_logits: jax.Array):
     """
     Calculates the router z-loss, as introduced in (https://arxiv.org/abs/2202.08906).
     This loss encourages the router logits to be more confident.
@@ -143,21 +143,17 @@ def router_z_loss(router_raw_logits: jax.Array):
     Returns:
         jax.Array: A scalar tensor representing the z-loss.
     """
-    z_loss = jnp.mean(jax.nn.logsumexp(router_raw_logits, axis=-1) ** 2)
+    z_loss = jnp.mean(jax.nn.logsumexp(router_logits, axis=-1) ** 2)
     return z_loss
 
 
 @functools.partial(
     jax.jit,
-    static_argnames=("num_experts", "batch_size", "sequence_length", "top_k"),
+    static_argnames=("num_experts", "top_k"),
 )
 def auxiliary_load_balancing_loss(
     num_experts: int,
-    hidden_states: jax.Array,
-    selected_experts: jax.Array,
-    selected_experts_weights: jax.Array,
-    batch_size: int,
-    sequence_length: int,
+    router_probs: jax.Array,
     top_k: int,
 ):
     """
@@ -167,42 +163,60 @@ def auxiliary_load_balancing_loss(
 
     Args:
         num_experts (int): The total number of experts in the MoE layer.
-        hidden_states (jax.Array): The hidden states from the previous layer.
         selected_experts (jax.Array): A tensor indicating which experts were selected for each token.
-                                        Shape: (batch_size, sequence_length, top_k)
+                                        Shape: (batch_size, sequence_length, top_k) or (total_tokens, top_k)
         selected_experts_weights (jax.Array): The weights assigned to each selected expert for each token.
-                                                Shape: (batch_size, sequence_length, top_k)
-        batch_size (int): The batch size.
-        sequence_length (int): The sequence length.
+                                                Shape: (batch_size, sequence_length, top_k) or (total_tokens, top_k)
+        top_k (int): The number of experts selected per token.
 
     Returns:
-        Tuple[jax.Array, jax.Array]: A tuple containing:
+        Tuple[jax.Array, jax.Array, jax.Array]: A tuple containing:
             - aux_loss (jax.Array): A scalar tensor representing the auxiliary load balancing loss.
-            - expert_counts (jax.Array): A tensor containing the number of tokens processed by each expert.
+            - expert_load (jax.Array): A tensor containing the sum of weights routed to each expert.
+            - expert_token_counts (jax.Array): A tensor containing the number of tokens routed to each expert.
     """
-    # Initialize count tensor for each expert
-    expert_counts = jnp.zeros(
-        num_experts,
-        dtype=hidden_states.dtype,
-    )
+    # Infer dtype from weights for load calculation
+    load_dtype = router_probs.dtype
+    count_dtype = jnp.int32
+
+    selected_experts_weights, selected_experts = jax.lax.top_k(router_probs, top_k)
+
+    # Initialize count tensors for each expert
+    expert_load = jnp.zeros(num_experts, dtype=load_dtype)
+    expert_token_counts = jnp.zeros(num_experts, dtype=count_dtype)
 
     # Reshape selected_experts and their weights for scatter operation
-    flat_experts = selected_experts.view(-1)  # [B*S*top_k]
-    flat_weights = selected_experts_weights.view(-1)  # [B*S*top_k]
+    flat_experts = selected_experts.reshape(-1)  # [B*S*top_k] or [total_tokens*top_k]
+    flat_weights = selected_experts_weights.reshape(
+        -1
+    )  # [B*S*top_k] or [total_tokens*top_k]
 
-    # Accumulate weights by expert index
-    # expert_counts.scatter_add_(0, flat_experts, flat_weights)
-    expert_counts = expert_counts.at[flat_experts].add(flat_weights)
+    # Accumulate weights (load) by expert index
+    expert_load = expert_load.at[flat_experts].add(flat_weights)
 
-    # Normalize by total tokens to get usage distribution
-    total_tokens = batch_size * sequence_length
-    expert_usage = expert_counts / (total_tokens * top_k)
+    # Accumulate token counts by expert index (add 1 for each assignment)
+    # Create an array of ones with the same shape as flat_weights but with count_dtype
+    ones_for_counts = jnp.ones_like(flat_weights, dtype=count_dtype)
+    expert_token_counts = expert_token_counts.at[flat_experts].add(ones_for_counts)
 
-    # Calculate auxiliary loss for load balancing
+    # Calculate total tokens from the shape of selected_experts (assuming B, S, K or N, K)
+    total_tokens = jax.lax.cond(
+        selected_experts.ndim == 3,
+        selected_experts.shape[0] * selected_experts.shape[1],
+        selected_experts.shape[0],
+    )
+
+    # Normalize expert_load by total tokens * top_k to get average usage probability per expert
+    # This represents the fraction of total routing probability mass directed to each expert
+    expert_usage = expert_load / jnp.array(total_tokens * top_k, dtype=load_dtype)
+
+    # Calculate auxiliary loss for load balancing (mean squared error vs uniform)
     ideal_usage = jnp.ones_like(expert_usage) / num_experts
+    # The scaling factor num_experts is common practice, matching the original paper's scaling
     aux_loss = jnp.mean((expert_usage - ideal_usage) ** 2) * num_experts
 
     return (
         aux_loss,
-        expert_counts,
+        expert_load,
+        expert_token_counts,
     )

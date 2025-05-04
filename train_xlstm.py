@@ -1,3 +1,4 @@
+import functools
 import json
 import logging
 import shutil
@@ -13,57 +14,166 @@ import optax
 import orbax.checkpoint as ocp
 from einops import rearrange
 from flax import nnx
+from flax.metrics.tensorboard import SummaryWriter
 from huggingface_hub import create_repo, repo_exists, upload_folder
 from omegaconf import DictConfig, OmegaConf
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (
     AutoTokenizer,
-    DataCollatorForLanguageModeling,
     HfArgumentParser,
 )
 
-from xlstm_jax import xLSTMLMModel
-from xlstm_jax._trainer.arguments import CustomArgs
-from xlstm_jax._trainer.data import get_dataset
-from xlstm_jax.utils import parse_xlstm_config_dict, str2dtype
+from moxe import MoxEConfig, MoxEForCausalLM
+from moxe._trainer.arguments import CustomArgs
+from moxe._trainer.data import create_dataloaders
+from moxe.observability import RouterMetricsWriter
+from moxe.output import MoxEForwardPassOutput
+from xlstm_jax.utils import str2dtype
 
 
-def loss_fn(model: xLSTMLMModel, batch: tuple[jnp.ndarray, ...]):
+def loss_fn(
+    model: MoxEForCausalLM,
+    batch: tuple[jnp.ndarray, ...],
+    z_loss_coef: float,
+    load_balancing_loss_coef: float,
+    d_loss_coef: float = 0.0,
+    group_loss_coef: float = 0.0,
+):
     """Compute the loss for a batch of data."""
     input_ids, labels = batch
-    logits = model(input_ids)
+    output = model(input_ids, return_layers_outputs=True)
 
     # shape: [batch, seq, vocab] -> [batch * (seq-1), vocab]
-    shifted_logits = rearrange(logits[..., :-1, :], "b s v -> (b s) v")
+    shifted_logits = rearrange(output.logits[..., :-1, :], "b s v -> (b s) v")
 
     # shape: [batch, seq] -> [batch * (seq-1)]
     shifted_labels = rearrange(labels[..., 1:], "b s -> (b s)")
 
     # Compute cross-entropy loss
-    loss = optax.softmax_cross_entropy_with_integer_labels(
+    ce_loss = optax.softmax_cross_entropy_with_integer_labels(
         logits=shifted_logits, labels=shifted_labels
     ).mean()
 
-    return loss, logits
+    total_loss = ce_loss
+
+    # -------------- Z-loss computation --------------------------------
+
+    per_layer_z_loss_tree = jtu.tree_map(
+        f=lambda layer: layer.z_loss,
+        tree=output.layers_outputs,
+    )
+
+    # accumulate z_loss per-layer
+    z_loss = jtu.tree_reduce(
+        jnp.add,
+        tree=per_layer_z_loss_tree,
+        initializer=jnp.zeros(()),
+    ).mean()
+
+    # -------------- LOAD BALANCING LOSS computation ---------------------
+    per_layer_load_balancing_loss = jtu.tree_map(
+        f=lambda layer: layer.load_balancing_loss,
+        tree=output.layers_outputs,
+    )
+
+    # reduction step
+    load_balancing_loss = jtu.tree_reduce(
+        jnp.add,
+        tree=per_layer_load_balancing_loss,
+        initializer=jnp.zeros(()),
+    ).mean()
+
+    # ---------------------- DIFFICULTY LOSS ------------------------
+    per_layer_d_loss = jtu.tree_map(
+        f=lambda layer: layer.conditioned_output.d_loss,
+        tree=output.layers_outputs,
+    )
+
+    # reduction step
+    d_loss = jtu.tree_reduce(
+        jnp.add,
+        tree=per_layer_d_loss,
+        initializer=jnp.zeros(()),
+    )
+
+    total_loss = total_loss + d_loss_coef * d_loss
+
+    # ------------------------ GROUP LOSS -----------------------------
+    per_layer_group_loss = jtu.tree_map(
+        f=lambda layer: layer.conditioned_output.group_loss,
+        tree=output.layers_outputs,
+    )
+
+    group_loss = jtu.tree_reduce(
+        jnp.add,
+        tree=per_layer_group_loss,
+        initializer=jnp.zeros(()),
+    ).mean()
+
+    loss = (
+        total_loss
+        + z_loss_coef * z_loss
+        + load_balancing_loss_coef * load_balancing_loss
+        + d_loss_coef * d_loss
+        + group_loss_coef * group_loss
+    )
+
+    return loss, MoxEForwardPassOutput(
+        model=output,
+        ce_loss=ce_loss,
+        z_loss=z_loss,
+        load_balance_loss=load_balancing_loss,
+        d_loss=d_loss,
+        group_loss=group_loss,
+    )
 
 
-@nnx.jit
+@functools.partial(
+    nnx.jit,
+    static_argnames=(
+        "z_loss_coef",
+        "load_balancing_loss_coef",
+        "d_loss_coef",
+        "group_loss_coef",
+    ),
+)
 def compute_grads_and_metrics(
-    model: xLSTMLMModel,
+    model: MoxEForCausalLM,
     metrics: nnx.MultiMetric,
     batch: tuple[jnp.ndarray, ...],
+    z_loss_coef: float,
+    load_balancing_loss_coef: float,
+    d_loss_coef: float = 0.0,
+    group_loss_coef: float = 0.0,
 ):
     """Computes gradients, loss, and updates metrics for a single micro-batch."""
     grad_fn = nnx.value_and_grad(loss_fn, has_aux=True, allow_int=True)
-    (loss, logits), grads = grad_fn(model, batch)
+    (loss, output), grads = grad_fn(
+        model,
+        batch,
+        z_loss_coef=z_loss_coef,
+        load_balancing_loss_coef=load_balancing_loss_coef,
+        d_loss_coef=d_loss_coef,
+        group_loss_coef=group_loss_coef,
+    )
+
+    output = cast(MoxEForwardPassOutput, output)
 
     # Calculate metrics for this micro-batch
-    perplexity = jnp.exp(loss)
+    perplexity = jnp.exp(output.ce_loss)
     grad_norm = optax.global_norm(grads)  # Calculate gradient norm
-    metrics.update(loss=loss, perplexity=perplexity, grad_norm=grad_norm)
+    metrics.update(
+        loss=loss,
+        ce_loss=output.ce_loss,
+        perplexity=perplexity,
+        z_loss=output.z_loss,
+        load_balancing_loss=output.load_balance_loss,
+        d_loss=output.d_loss,
+        group_loss=output.group_loss,
+        grad_norm=grad_norm,
+    )
 
-    return loss, grads, grad_norm  # Return grad_norm for potential immediate logging
+    return loss, grads, grad_norm, output
 
 
 @nnx.jit
@@ -75,15 +185,35 @@ def apply_gradients(
     optimizer.update(grads)
 
 
-@nnx.jit
+@functools.partial(
+    nnx.jit,
+    static_argnames=(
+        "z_loss_coef",
+        "load_balancing_loss_coef",
+        "d_loss_coef",
+        "group_loss_coef",
+    ),
+)
 def eval_step(
-    model: xLSTMLMModel,
+    model: MoxEForCausalLM,
     metrics: nnx.MultiMetric,
     batch: tuple[jnp.ndarray, ...],
+    z_loss_coef: float,
+    load_balancing_loss_coef: float,
+    d_loss_coef: float = 0.0,
+    group_loss_coef: float = 0.0,
 ):
     """Perform a single evaluation step."""
-    loss, logits = loss_fn(model, batch)
-    perplexity = jnp.exp(loss)
+    loss, output = loss_fn(
+        model,
+        batch,
+        z_loss_coef=z_loss_coef,
+        load_balancing_loss_coef=load_balancing_loss_coef,
+        d_loss_coef=d_loss_coef,
+        group_loss_coef=group_loss_coef,
+    )
+
+    perplexity = jnp.exp(output.ce_loss)
     # Note: grad_norm is not computed during evaluation
     metrics.update(loss=loss, perplexity=perplexity)
 
@@ -103,7 +233,6 @@ def main(cfg: DictConfig):
     # Load trainer arguments from YAML file
     args = parser.parse_dict(OmegaConf.to_container(cfg["trainer"], resolve=True))[0]
     args = cast(CustomArgs, args)
-    # Ensure CustomArgs dataclass in xlstm_jax._trainer.arguments includes a 'warmup_steps' field.
     if not hasattr(args, "warmup_steps"):
         args.warmup_steps = 500  # Default value if not provided
         logger.warning(
@@ -126,76 +255,17 @@ def main(cfg: DictConfig):
     config_dict = OmegaConf.to_container(cfg["model"], resolve=True)
     config_dict["vocab_size"] = tokenizer.vocab_size
     print(config_dict)
-    config = parse_xlstm_config_dict(config_dict)
+    config = MoxEConfig.from_dict(config_dict)
     config.pad_token_id = tokenizer.pad_token_id
 
     # Model instance
     dtype_str = cfg["dtype"]
-    logger.info(f"Creating xLSTM model with dtype={dtype_str}...")
+    logger.info(f"Creating MoxE model with dtype={dtype_str}...")
     dtype = str2dtype(dtype_str)
     rngs = nnx.Rngs(args.seed)
-    model = xLSTMLMModel(config, rngs=rngs, dtype=dtype)
+    model = MoxEForCausalLM(config, rngs=rngs, dtype=dtype)
 
-    logger.info(
-        f"Loading training dataset from {args.train_dataset_url} with {args.train_samples} samples"
-    )
-
-    train_dataset = get_dataset(
-        hub_url=args.train_dataset_url,
-        subset=args.train_subset,
-        features=args.features,
-        max_seq_length=config.context_length,
-        tokenizer=tokenizer,
-        split=args.train_split,
-        num_samples=args.train_samples,
-        token=args.hub_token,
-        trust_remote_code=args.trust_remote_code,
-    )
-
-    train_dataset.set_format("numpy", columns=["input_ids", "attention_mask", "length"])
-
-    logger.info(
-        f"Loading evaluation dataset from {args.eval_dataset_url} with {args.eval_samples} samples"
-    )
-
-    eval_dataset = get_dataset(
-        hub_url=args.eval_dataset_url,
-        subset=args.eval_subset,
-        features=args.features,
-        max_seq_length=config.context_length,
-        tokenizer=tokenizer,
-        split=args.eval_split,
-        num_samples=args.eval_samples,
-        token=args.hub_token,
-        trust_remote_code=args.trust_remote_code,
-    )
-
-    eval_dataset.set_format("numpy", columns=["input_ids", "attention_mask", "length"])
-
-    logger.info("Initializing trainer...")
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=False,
-        return_tensors="np",
-    )
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.per_device_train_batch_size,
-        collate_fn=data_collator,
-        num_workers=args.dataloader_num_workers,
-        shuffle=True,
-        drop_last=True,  # Important for grad accumulation if dataset size isn't divisible
-    )
-
-    eval_loader = DataLoader(
-        eval_dataset,
-        batch_size=args.per_device_eval_batch_size,
-        collate_fn=data_collator,
-        num_workers=args.dataloader_num_workers,
-        shuffle=False,
-        drop_last=False,
-    )
+    train_loader, eval_loader = create_dataloaders(logger, args, tokenizer, config)
 
     # Calculate total training steps for the scheduler
     num_train_micro_batches = len(train_loader)
@@ -251,6 +321,8 @@ def main(cfg: DictConfig):
         "eval_perplexity": [],
     }
 
+    metrics_writer = RouterMetricsWriter(writer=SummaryWriter(log_dir=args.output_dir))
+
     # checkpoint manager
     ckpt_dir = Path(args.logging_dir).absolute()
     ckpt_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
@@ -291,8 +363,14 @@ def main(cfg: DictConfig):
                 _batch = (input_ids, labels)
 
                 # Compute gradients for the micro-batch and update metrics
-                loss, grads, grad_norm = compute_grads_and_metrics(
-                    model, metrics, _batch
+                loss, grads, grad_norm, output = compute_grads_and_metrics(
+                    model,
+                    metrics,
+                    _batch,
+                    z_loss_coef=args.z_loss_coef,
+                    load_balancing_loss_coef=args.load_balancing_loss_coef,
+                    d_loss_coef=args.d_loss_coef,
+                    group_loss_coef=args.group_loss_coef,
                 )
 
                 # Initialize or accumulate gradients
@@ -357,6 +435,11 @@ def main(cfg: DictConfig):
                         log_data["lr"] = f"{current_lr.item():.2e}"  # Show current LR
                         pbar.set_postfix(log_data)
                         pbar.refresh()
+
+                        # write to tensorboard
+                        metrics_writer.log_moe_metrics(
+                            global_step=global_step, output=output
+                        )
 
                         # Reset metrics after logging for the next accumulation cycle
                         metrics.reset()

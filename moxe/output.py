@@ -1,6 +1,6 @@
 import typing as tp
 
-import jax.numpy as jnp
+import jax
 
 
 class MoELayerType:
@@ -88,10 +88,18 @@ class ModulationBias:
 
 
 class ConditionedGateOutput(tp.NamedTuple):
-    unbiased_logits: jnp.ndarray
-    probabilities: jnp.ndarray
-    bias: jnp.ndarray
-    d_t: jnp.ndarray
+    unbiased_logits: jax.Array
+    probabilities: jax.Array
+    bias: jax.Array
+    d_t: jax.Array
+    z_loss: jax.Array
+    load_balancing_loss: jax.Array
+    router_entropy: jax.Array
+    predicted_entropy: jax.Array
+    expert_load: jax.Array
+    expert_token_counts: jax.Array
+    d_loss: jax.Array
+    group_loss: jax.Array
 
 
 class MoxELayerOutput(tp.NamedTuple):
@@ -104,17 +112,31 @@ class MoxELayerOutput(tp.NamedTuple):
     - **conditioned_output**: The output of the conditioned gate layer of type `ConditionedGateOutput`.
     """
 
-    router_logits: jnp.ndarray
-    hidden_states: jnp.ndarray
+    router_logits: jax.Array
+    router_probs: jax.Array
+    hidden_states: jax.Array
+    z_loss: jax.Array
+    load_balancing_loss: jax.Array
+    expert_load: jax.Array
+    expert_token_counts: jax.Array
     conditioned_output: tp.Optional[ConditionedGateOutput] = None
 
 
 class MoxEModelOutput(tp.NamedTuple):
-    hidden_states: jnp.ndarray
+    hidden_states: jax.Array
     layers_outputs: tp.Optional[tuple[MoxELayerOutput]] = None
 
 
 class MoxECausalLMOutput(tp.NamedTuple):
-    logits: jnp.ndarray
-    hidden_states: tp.Optional[jnp.ndarray] = None
+    logits: jax.Array
+    hidden_states: tp.Optional[jax.Array] = None
     layers_outputs: tp.Optional[tuple[MoxELayerOutput]] = None
+
+
+class MoxEForwardPassOutput(tp.NamedTuple):
+    model: MoxECausalLMOutput
+    ce_loss: jax.Array
+    z_loss: jax.Array
+    load_balance_loss: jax.Array
+    d_loss: jax.Array
+    group_loss: jax.Array

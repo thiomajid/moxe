@@ -8,7 +8,7 @@ from flax.metrics.tensorboard import SummaryWriter
 from PIL import Image
 
 from moxe.ops import compute_entropy
-from moxe.output import MoxELayerOutput
+from moxe.output import MoxEForwardPassOutput, MoxELayerOutput
 
 
 class RouterMetricsWriter:
@@ -16,12 +16,22 @@ class RouterMetricsWriter:
         self._writer = writer
         self.num_devices = num_devices
 
+    def add_text(self, text: str, tag: str, global_step: int) -> None:
+        """Add text to the writer."""
+        self._writer.text(text, tag, global_step)
+
     def add_scalars(self, scalars: dict[str, tp.Any], global_step: int) -> None:
         """Add scalars to the writer."""
         for key, value in scalars.items():
             if isinstance(value, jax.Array):
                 value = jax.device_get(value).item()
             self._writer.scalar(key, value, global_step)
+
+    def log_moe_metrics(self, global_step: int, output: MoxEForwardPassOutput):
+        for idx, layer_output in enumerate(output.model.layers_outputs):
+            self._log_moe_layer_metrics(
+                layer_idx=idx, layer_output=layer_output, global_step=global_step
+            )
 
     def __plot_expert_usage(
         self,
@@ -97,16 +107,12 @@ class RouterMetricsWriter:
             absolute_usage_img,
         )
 
-    def log_moe_layer_metrics(
+    def _log_moe_layer_metrics(
         self,
         layer_idx: int,
         global_step: int,
         layer_output: MoxELayerOutput,
-        z_loss: jax.Array,
-        aux_loss: jax.Array,
         expert_usage_counts: jax.Array,
-        d_loss: tp.Optional[jax.Array] = None,
-        group_loss: tp.Optional[jax.Array] = None,
     ) -> None:
         """Log MoE-specific metrics to TensorBoard for a single layer."""
 
@@ -207,8 +213,8 @@ class RouterMetricsWriter:
             "expert_usage/std": absolute_expert_usage.std().mean().item(),
             "expert_usage/max": absolute_expert_usage.max().mean().item(),
             "expert_usage/min": absolute_expert_usage.min().mean().item(),
-            "router/z_loss": z_loss.mean().item(),
-            "router/aux_loss": aux_loss.mean().item(),
+            "router/z_loss": layer_output.z_loss.item(),
+            "router/load_balancing_loss": layer_output.load_balancing_loss.item(),
         }
 
         if layer_output.conditioned_output is not None:
@@ -236,11 +242,13 @@ class RouterMetricsWriter:
                     global_step,
                 )
 
-            if d_loss is not None:
-                layer_metrics["router/d_loss"] = d_loss.mean().item()
+            layer_metrics["router/d_loss"] = (
+                layer_output.conditioned_output.d_loss.item()
+            )
 
-            if group_loss is not None:
-                layer_metrics["router/group_loss"] = group_loss.mean().item()
+            layer_metrics["router/group_loss"] = (
+                layer_output.conditioned_output.group_loss.item()
+            )
 
         # Log all metrics under the layer prefix
         for name, value in layer_metrics.items():

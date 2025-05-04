@@ -22,7 +22,7 @@ class xLSTMMoELayer(nnx.Module):
         hidden_states = self.sequence_mixer(hidden_states)
 
         batch_size, sequence_length, hidden_dim = hidden_states.shape
-        flat_hidden_states = hidden_states.view(-1, hidden_dim)  # (B*S, D)
+        flat_hidden_states = hidden_states.reshape(-1, hidden_dim)  # (B*S, D)
 
         router_logits = self.gate(flat_hidden_states)  # (B*S, num_experts)
         routing_weights = jax.nn.softmax(router_logits, axis=1)
@@ -69,6 +69,6 @@ class xLSTMMoELayer(nnx.Module):
             final_hidden_states = final_hidden_states.at[top_x].add(weighted_output)
 
         # reshape back to 3D
-        final_hidden_states = final_hidden_states.view(
+        final_hidden_states = final_hidden_states.reshape(
             batch_size, sequence_length, hidden_dim
         )
