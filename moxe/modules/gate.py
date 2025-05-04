@@ -11,7 +11,7 @@ from ..ops import (
     kl_auxiliary_group_loss,
     router_z_loss,
 )
-from ..output import ConditionedGateOutput
+from ..output import ConditionedGateOutput, str2modulation_bias
 
 
 def _standard_modulation(gamma: float, d_t: jax.Array, _):
@@ -80,7 +80,7 @@ class BiasConditionedGate(nnx.Module):
             rngs=rngs,
         )
 
-        self.modulation_bias_kind = config.modulation_bias
+        self.modulation_bias_kind = str2modulation_bias(config.modulation_bias)
 
         self._modulation_fns = [
             _standard_modulation,
@@ -133,8 +133,8 @@ class BiasConditionedGate(nnx.Module):
         flat_h_t = h_t.reshape(-1, hidden_dim)
         unbiased_logits = self.router(flat_h_t)  # [B*S, num_experts]
         flat_bias = bias.reshape(-1, self.num_experts)  # [B*S, num_experts]
-        adjusted_logits = unbiased_logits + flat_bias
-        router_probs = jax.nn.softmax(adjusted_logits, axis=-1)
+        conditioned_logits = unbiased_logits + flat_bias
+        router_probs = jax.nn.softmax(conditioned_logits, axis=-1)
 
         # -------------- Z-loss and load_balancing_loss ----------------
         z_loss = router_z_loss(unbiased_logits)
@@ -150,7 +150,7 @@ class BiasConditionedGate(nnx.Module):
         d_loss, router_entropy, predicted_entropy = lax.cond(
             compute_d_loss,
             lambda: _d_loss_computation(unbiased_logits=unbiased_logits, d_t=d_t),
-            lambda: (jnp.zeros(()),) * 3,
+            lambda: (jnp.zeros((), dtype=h_t.dtype),) * 3,
         )
 
         # --------------------- group_wise loss ---------------------------------
@@ -162,11 +162,12 @@ class BiasConditionedGate(nnx.Module):
                 seq_len=seq_len,
                 num_experts=router_probs.shape[-1],
             ),
-            lambda: jnp.zeros(()),
+            lambda: jnp.zeros((), dtype=h_t.dtype),
         )
 
         return ConditionedGateOutput(
             unbiased_logits=unbiased_logits,
+            conditioned_logits=conditioned_logits,
             probabilities=router_probs,
             bias=bias,
             d_t=d_t,

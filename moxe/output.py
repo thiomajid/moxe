@@ -89,6 +89,7 @@ class ModulationBias:
 
 class ConditionedGateOutput(tp.NamedTuple):
     unbiased_logits: jax.Array
+    conditioned_logits: jax.Array
     probabilities: jax.Array
     bias: jax.Array
     d_t: jax.Array

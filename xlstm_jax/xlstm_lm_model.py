@@ -1,14 +1,13 @@
 # Copyright (c) NXAI GmbH and its affiliates 2024
 # Maximilian Beck
 # Converted to JAX/Flax by Abdoul Majid O. Thiombiano
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 import jax.numpy as jnp
 from flax import nnx
 
 from .components.init import small_init_initializer
 from .components.util import Identity
-from .utils import parse_xlstm_config_dict
 from .xlstm_block_stack import xLSTMBlockStack, xLSTMBlockStackConfig
 
 
@@ -18,13 +17,6 @@ class xLSTMLMModelConfig(xLSTMBlockStackConfig):
     tie_weights: bool = False
     weight_decay_on_embedding: bool = False
     add_embedding_dropout: bool = False
-
-    def to_dict(self):
-        return asdict(self)
-
-    @staticmethod
-    def from_dict(config_dict):
-        return parse_xlstm_config_dict(config_dict)
 
 
 class xLSTMLMModel(nnx.Module):

@@ -28,6 +28,17 @@ class RouterMetricsWriter:
             self._writer.scalar(key, value, global_step)
 
     def log_moe_metrics(self, global_step: int, output: MoxEForwardPassOutput):
+        self.add_scalars(
+            global_step=global_step,
+            scalars={
+                "train/ce_loss": output.ce_loss.item(),
+                "train/z_loss": output.z_loss.item(),
+                "train/load_balance_loss": output.load_balance_loss.item(),
+                "train/d_loss": output.d_loss.item(),
+                "train/group_loss": output.group_loss.item(),
+            },
+        )
+
         for idx, layer_output in enumerate(output.model.layers_outputs):
             self._log_moe_layer_metrics(
                 layer_idx=idx, layer_output=layer_output, global_step=global_step

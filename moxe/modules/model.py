@@ -37,6 +37,8 @@ class MoxEModel(nnx.Module):
         self,
         input_ids: jnp.ndarray,
         return_layers_outputs: bool = False,
+        compute_d_loss: bool = True,
+        compute_group_loss: bool = True,
     ):
         layers_outputs: tuple[MoxELayerOutput, ...] | None = (
             () if return_layers_outputs else None
@@ -45,7 +47,11 @@ class MoxEModel(nnx.Module):
         h_t = self.embedding_dropout(h_t)
 
         for layer in self.layers:
-            layer_out = layer(h_t)
+            layer_out = layer(
+                h_t,
+                compute_d_loss=compute_d_loss,
+                compute_group_loss=compute_group_loss,
+            )
             h_t = layer_out.hidden_states
 
             if return_layers_outputs:
@@ -65,7 +71,7 @@ class MoxEForCausalLM(nnx.Module):
 
         self.lm_head = nnx.Linear(
             in_features=config.xlstm.embedding_dim,
-            out_features=config.vocab_size,
+            out_features=config.xlstm.vocab_size,
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
@@ -79,15 +85,24 @@ class MoxEForCausalLM(nnx.Module):
     def __call__(
         self,
         input_ids: jnp.ndarray,
+        output_hidden_states: bool = False,
         return_layers_outputs: bool = False,
+        compute_d_loss: bool = True,
+        compute_group_loss: bool = True,
     ):
-        moe_out = self.moe(input_ids, return_layers_outputs=return_layers_outputs)
+        moe_out = self.moe(
+            input_ids,
+            return_layers_outputs=return_layers_outputs,
+            compute_d_loss=compute_d_loss,
+            compute_group_loss=compute_group_loss,
+        )
+
         h_t = moe_out.hidden_states
         h_t = self.norm(h_t)
         logits = self.lm_head(h_t)
 
         return MoxECausalLMOutput(
             logits=logits,
-            hidden_states=h_t,
+            hidden_states=h_t if output_hidden_states else None,
             layers_outputs=moe_out.layers_outputs,
         )

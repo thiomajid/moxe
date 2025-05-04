@@ -4,6 +4,7 @@ from typing import Optional
 from omegaconf import DictConfig, OmegaConf
 
 from moxe.output import ModulationBias
+from moxe.utils.parser import parse_xlstm_config_dict
 from xlstm_jax.xlstm_lm_model import xLSTMLMModelConfig
 
 
@@ -68,5 +69,5 @@ class MoxEConfig:
         else:
             xlstm_config_dict = config_dict.pop("xlstm")
 
-        xlstm_config = xLSTMLMModelConfig.from_dict(xlstm_config_dict)
+        xlstm_config = parse_xlstm_config_dict(xlstm_config_dict)
         return cls(xlstm=xlstm_config, **config_dict)

@@ -1,0 +1,61 @@
+# MoE specific arguments
+monitored_layers: "all"
+router_loss_coef: 0.001
+difficulty_loss_coef: 0.2
+group_loss_coef: 0.2
+
+# Experiment conditioning
+return_layers_outputs: true
+compute_router_losses: true
+return_difficulty_loss: false
+return_group_auxiliary_loss: false
+
+# Custom training arguments
+tokenizer: "HuggingFaceTB/SmolLM2-1.7B"
+model_config: "./model_config.yaml"
+train_dataset_url: "roneneldan/TinyStories"
+features: ["text"]
+
+# train_subset: "cosmopedia-v2"
+train_split: "train"
+train_samples: 8
+
+eval_subset: "fineweb-edu-dedup"
+eval_split: "validation"
+eval_samples: 8
+
+use_dataset_cache: true
+dataset_cache_dir: "./.hf_data_cache"
+
+# HF TrainerArguments arguments
+num_train_epochs: 3
+gradient_accumulation_steps: 2
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 2
+
+# optim args
+learning_rate: 0.0002
+weight_decay: 0.001
+warmup_ratio: 0.1
+optim: "adamw_torch"
+lr_scheduler_type: "cosine"
+torch_compile: false
+fp16: false
+use_cpu: false
+gradient_checkpointing: false
+
+output_dir: "artifacts"
+logging_dir: "artifacts"
+report_to: "tensorboard"
+logging_steps: 200
+save_steps: 200
+hub_private_repo: false
+save_total_limit: 2
+load_best_model_at_end: true
+eval_strategy: "steps"
+
+push_to_hub: false
+resume_from_checkpoint: "artifacts"
+hub_model_id: "thiomajid/moxe_v0_with_ffn"
+remove_unused_columns: false
+trust_remote_code: true

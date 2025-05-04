@@ -1,13 +1,16 @@
+import typing as tp
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional
+
+import jax.numpy as jnp
+from flax import nnx
 
 from moxe.config import MoxEConfig
 from moxe.modules.ffn_expert import FeedForwardExpert
 from moxe.output import ExpertModule, MoELayerType
 from xlstm_jax.blocks.mlstm.block import mLSTMBlock
-from xlstm_jax.xlstm_block_stack import xLSTMBlockStack
+from xlstm_jax.blocks.slstm.block import sLSTMBlock
 
 PathLike = Path | str
 
@@ -33,13 +36,17 @@ def get_moe_layer(layer_type: str):
     )
 
 
-def get_expert_modules(config: MoxEConfig):
+def get_expert_modules(config: MoxEConfig, rngs: nnx.Rngs, dtype=jnp):
     if config.expert_type == ExpertModule.MLP:
-        return [FeedForwardExpert(config) for _ in range(config.num_experts)]
+        return [
+            FeedForwardExpert(config, rngs=rngs, dtype=dtype)
+            for _ in range(config.num_experts)
+        ]
 
     elif config.expert_type == ExpertModule.mLSTM:
         return [
-            [mLSTMBlock(config.xlstm.mlstm_block) for _ in range(config.num_experts)]
+            mLSTMBlock(config.xlstm.mlstm_block, rngs=rngs, dtype=dtype)
+            for _ in range(config.num_experts)
         ]
 
     elif (
@@ -57,20 +64,23 @@ def get_expert_modules(config: MoxEConfig):
 
         if config.expert_type == ExpertModule.sLSTM:
             return [
-                xLSTMBlockStack(__config).blocks[0] for _ in range(config.num_experts)
+                sLSTMBlock(__config.slstm_block, rngs=rngs, dtype=dtype)
+                for _ in range(config.num_experts)
             ]
 
         expert_per_group = config.num_experts // 2
         mlstm_experts = [
-            mLSTMBlock(config.xlstm.mlstm_block) for _ in range(expert_per_group)
+            mLSTMBlock(config.xlstm.mlstm_block, rngs=rngs, dtype=dtype)
+            for _ in range(expert_per_group)
         ]
 
         # blocks[0] otherwise an additional LayerNorm is added by xLSTMBlockStack
         sltm_experts = [
-            xLSTMBlockStack(__config).blocks[0] for _ in range(expert_per_group)
+            sLSTMBlock(__config.slstm_block, rngs=rngs, dtype=dtype)
+            for _ in range(expert_per_group)
         ]
 
-        return [mlstm_experts + sltm_experts]
+        return mlstm_experts + sltm_experts
 
     raise ValueError(
         f"Unknown expert module type: {config.expert_type}. "
@@ -78,7 +88,7 @@ def get_expert_modules(config: MoxEConfig):
     )
 
 
-_EvalModelKind = Literal["moxe", "xlstm", "hub_model"]
+_EvalModelKind = tp.Literal["moxe", "xlstm", "hub_model"]
 
 
 @dataclass
@@ -94,10 +104,10 @@ class PerplexityEvaluationConfig:
         max_seq_length: int,
         num_workers: int,
         local_dir: PathLike | None = None,
-        data_subset: Optional[str] = None,
-        samples: int | Literal["all"] = "all",
+        data_subset: tp.Optional[str] = None,
+        samples: int | tp.Literal["all"] = "all",
         pin_memory: bool = True,
-        hub_token: Optional[str] = None,
+        hub_token: tp.Optional[str] = None,
     ):
         self.model_type = model_type
         self.local_dir = local_dir

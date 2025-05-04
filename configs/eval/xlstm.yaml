@@ -1,0 +1,15 @@
+model_type: "xlstm"
+local_dir: "./.xlstm_1024dim"
+hub_url: "thiomajid/large-xlstm-moxe-baseline-1024dim"
+dataset_url: "EleutherAI/lambada_openai"
+data_subset: "en"
+data_split: "test"
+text_column: "text"
+batch_size: 32
+max_seq_length: 256
+num_workers: 4
+samples: "all"
+device: "cuda"
+pin_memory: true
+fp16: true
+hub_token: null

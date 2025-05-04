@@ -202,8 +202,8 @@ def auxiliary_load_balancing_loss(
     # Calculate total tokens from the shape of selected_experts (assuming B, S, K or N, K)
     total_tokens = jax.lax.cond(
         selected_experts.ndim == 3,
-        selected_experts.shape[0] * selected_experts.shape[1],
-        selected_experts.shape[0],
+        lambda: selected_experts.shape[0] * selected_experts.shape[1],
+        lambda: selected_experts.shape[0],
     )
 
     # Normalize expert_load by total tokens * top_k to get average usage probability per expert

@@ -2,7 +2,7 @@
 # Maximilian Beck
 # Converted to JAX/Flax by Abdoul Majid O. Thiombiano
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import List, Literal, Optional, Union
 
 import jax.numpy as jnp
@@ -12,7 +12,6 @@ from .blocks.mlstm.block import mLSTMBlock, mLSTMBlockConfig
 from .blocks.slstm.block import sLSTMBlock, sLSTMBlockConfig
 from .components.ln import LayerNorm
 from .components.util import Identity
-from .utils import parse_xlstm_config_dict
 
 
 @dataclass
@@ -77,13 +76,6 @@ class xLSTMBlockStackConfig:
             self.slstm_block.__post_init__()
 
         self._block_map = self._create_block_map()
-
-    def to_dict(self):
-        return asdict(self)
-
-    @staticmethod
-    def from_dict(config_dict):
-        return parse_xlstm_config_dict(config_dict)
 
 
 class xLSTMBlockStack(nnx.Module):

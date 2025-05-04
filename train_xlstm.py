@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import cast
 
 import hydra
-import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 import optax
@@ -218,7 +217,7 @@ def eval_step(
     metrics.update(loss=loss, perplexity=perplexity)
 
 
-@hydra.main(config_path="./configs", config_name="train_config", version_base="1.1")
+@hydra.main(config_path="./configs", config_name="config", version_base="1.1")
 def main(cfg: DictConfig):
     # Set up logging
     logging.basicConfig(
@@ -333,7 +332,6 @@ def main(cfg: DictConfig):
     # if needed and descriptive messages
     global_step = 0  # Tracks optimizer steps
     accumulated_grads = None
-    grad_structure = None  # To store the structure for zero init
 
     logger.info("Starting training loop...")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
@@ -375,10 +373,6 @@ def main(cfg: DictConfig):
 
                 # Initialize or accumulate gradients
                 if accumulated_grads is None:
-                    # Get structure from the first computed grads
-                    grad_structure = jtu.tree_map(
-                        lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), grads
-                    )
                     accumulated_grads = jtu.tree_map(jnp.zeros_like, grads)
 
                 accumulated_grads = jtu.tree_map(
@@ -400,6 +394,14 @@ def main(cfg: DictConfig):
                     scaled_grads = jtu.tree_map(
                         lambda g: g / args.gradient_accumulation_steps,
                         accumulated_grads,
+                    )
+
+                    metrics_writer.add_scalars(
+                        global_step=global_step,
+                        scalars={
+                            "train/grad_norm": grad_norm,
+                            "train/learning_rate": lr_schedule(global_step),
+                        },
                     )
 
                     # Apply the gradients

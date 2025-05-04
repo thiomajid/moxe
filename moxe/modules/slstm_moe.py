@@ -29,6 +29,6 @@ class sLSTMMoELayer(xLSTMMoELayer):
         mixer_config.slstm_at = "all"
         _block_map = [1, 1]
         mixer_config._block_map = ",".join(map(str, _block_map))
-        self.sequence_mixer = xLSTMBlockStack(mixer_config)
+        self.sequence_mixer = xLSTMBlockStack(mixer_config, rngs=rngs, dtype=dtype)
 
-        self.experts = get_expert_modules(config)
+        self.experts = get_expert_modules(config, rngs=rngs, dtype=dtype)

@@ -6,10 +6,10 @@ from einops import rearrange
 from flax import nnx
 from jax import lax
 
-from moxe.ops import auxiliary_load_balancing_loss, router_z_loss
 from xlstm_jax.xlstm_block_stack import xLSTMBlockStack
 
 from ..config import MoxEConfig
+from ..ops import auxiliary_load_balancing_loss, router_z_loss
 from ..output import ConditionedGateOutput, MoxELayerOutput, SparsityGateType
 from ..utils.types import get_expert_modules
 from .gate import BiasConditionedGate
@@ -30,15 +30,15 @@ class MoxELayer(nnx.Module):
         mixer_config.slstm_at = [0]
         _block_map = [1, 0]
         mixer_config._block_map = ",".join(map(str, _block_map))
-        self.sequence_mixer = xLSTMBlockStack(mixer_config)
+        self.sequence_mixer = xLSTMBlockStack(mixer_config, rngs=rngs, dtype=dtype)
 
         self.gate = self.__create_router(config, rngs, dtype=dtype)
-        self.experts = get_expert_modules(config)
+        self.experts = get_expert_modules(config, rngs=rngs, dtype=dtype)
 
     def __create_router(self, config: MoxEConfig, rngs: nnx.Rngs, dtype=jnp.float32):
         match config.router_type:
             case SparsityGateType.CONDITIONED_ADDITION:
-                return BiasConditionedGate(config)
+                return BiasConditionedGate(config, rngs=rngs, dtype=dtype)
             case SparsityGateType.STANDARD:
                 return nnx.Linear(
                     config.xlstm.embedding_dim,
@@ -54,7 +54,12 @@ class MoxELayer(nnx.Module):
             f" Supported values are {SparsityGateType.values()}"
         )
 
-    def __call__(self, h_t: jnp.ndarray):
+    def __call__(
+        self,
+        h_t: jnp.ndarray,
+        compute_d_loss: bool = True,
+        compute_group_loss: bool = True,
+    ):
         h_t = self.sequence_mixer(h_t)
         batch_size, sequence_length, hidden_dim = h_t.shape
 
@@ -62,8 +67,12 @@ class MoxELayer(nnx.Module):
         gate_output: ConditionedGateOutput | None = None
 
         if isinstance(self.gate, BiasConditionedGate):
-            gate_output = self.gate(h_t)
-            router_logits = gate_output.unbiased_logits + gate_output.bias
+            gate_output = self.gate(
+                h_t,
+                compute_d_loss=compute_d_loss,
+                compute_group_loss=compute_group_loss,
+            )
+            router_logits = gate_output.conditioned_logits
         else:
             router_logits = self.gate(h_t)
 
@@ -82,17 +91,15 @@ class MoxELayer(nnx.Module):
             "batch top_k experts -> experts top_k batch",
         )
 
-        for expert_idx in range(self.num_experts):
-            expert_layer = self.experts[expert_idx]
-
+        for expert_idx, expert in enumerate(self.experts):
             # find tokens that are routed to the expert
             idx, top_x = jnp.where(expert_mask[expert_idx])
 
-            if top_x.size == 0:  # Skip unused experts
-                continue
+            # if top_x.size == 0:  # Skip unused experts
+            #     continue
 
-            if top_x.max() >= flat_hidden_states.size(0):
-                raise IndexError("Index out of bounds in top_x")
+            # if top_x.max() >= flat_hidden_states.shape[0]:
+            #     raise IndexError("Index out of bounds in top_x")
 
             # Reshape to 3D for mLSTMBlock
             current_state = flat_hidden_states[top_x]  # (num_selected, D)
@@ -100,7 +107,7 @@ class MoxELayer(nnx.Module):
                 current_state, axis=1
             )  # (num_selected, 1, D)
 
-            expert_output = expert_layer(current_state)  # (num_selected, 1, D)
+            expert_output = expert(current_state)  # (num_selected, 1, D)
             expert_output = jnp.squeeze(expert_output, axis=1)  # (num_selected, D)
 
             weighted_output = expert_output * router_probs[top_x, idx, None]
