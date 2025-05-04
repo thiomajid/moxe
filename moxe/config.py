@@ -31,8 +31,6 @@ class MoxEConfig:
         xlstm: Optional[xLSTMLMModelConfig] = None,
         **kwargs,
     ):
-        super().__init__(**kwargs)
-
         if xlstm is None:
             xlstm = xLSTMLMModelConfig()
 

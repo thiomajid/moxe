@@ -1,29 +1,28 @@
 # MoE specific arguments
 monitored_layers: "all"
-router_loss_coef: 0.001
-difficulty_loss_coef: 0.2
-group_loss_coef: 0.2
+z_loss_coef: 0.001
+load_balancing_loss_coef: 0.01
+d_loss_coef: 0.01
+group_loss_coef: 0.01
 
 # Experiment conditioning
 return_layers_outputs: true
 compute_router_losses: true
-return_difficulty_loss: false
-return_group_auxiliary_loss: false
+compute_d_loss: true
+compute_group_loss: true
 
 # Custom training arguments
 tokenizer: "HuggingFaceTB/SmolLM2-1.7B"
-model_config: "./model_config.yaml"
 train_dataset_url: "roneneldan/TinyStories"
-features: ["text"]
-
 # train_subset: "cosmopedia-v2"
 train_split: "train"
 train_samples: 8
 
-eval_subset: "fineweb-edu-dedup"
+eval_dataset_url: "roneneldan/TinyStories"
+# eval_subset: "roneneldan/TinyStories"
 eval_split: "validation"
 eval_samples: 8
-
+features: ["text"]
 use_dataset_cache: true
 dataset_cache_dir: "./.hf_data_cache"
 

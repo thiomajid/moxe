@@ -58,7 +58,7 @@ def loss_fn(
     # -------------- Z-loss computation --------------------------------
 
     per_layer_z_loss_tree = jtu.tree_map(
-        f=lambda layer: layer.z_loss,
+        f=lambda layer: layer[3],
         tree=output.layers_outputs,
     )
 
@@ -491,9 +491,6 @@ def main(cfg: DictConfig):
             eval_log_data = {
                 f"eval_{k}": f"{v.item():.4f}" for k, v in computed_eval_metrics.items()
             }
-            # Add current LR to eval postfix as well for context
-            current_lr_eval = lr_schedule(global_step)
-            eval_log_data["lr"] = f"{current_lr_eval.item():.2e}"
             pbar.set_postfix(eval_log_data)
             pbar.refresh()
             logger.info(f"Epoch {epoch + 1} Evaluation Results: {eval_log_data}")

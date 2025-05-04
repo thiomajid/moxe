@@ -87,7 +87,7 @@ class ModulationBias:
         ]
 
 
-class ConditionedGateOutput(tp.NamedTuple):
+class ConditionedGateOutput(tp.TypedDict):
     unbiased_logits: jax.Array
     conditioned_logits: jax.Array
     probabilities: jax.Array
@@ -103,7 +103,7 @@ class ConditionedGateOutput(tp.NamedTuple):
     group_loss: jax.Array
 
 
-class MoxELayerOutput(tp.NamedTuple):
+class MoxELayerOutput(tp.TypedDict):
     """
     This class is used to store the output of the MoE layer.
 
@@ -123,18 +123,18 @@ class MoxELayerOutput(tp.NamedTuple):
     conditioned_output: tp.Optional[ConditionedGateOutput] = None
 
 
-class MoxEModelOutput(tp.NamedTuple):
+class MoxEModelOutput(tp.TypedDict):
     hidden_states: jax.Array
     layers_outputs: tp.Optional[tuple[MoxELayerOutput]] = None
 
 
-class MoxECausalLMOutput(tp.NamedTuple):
+class MoxECausalLMOutput(tp.TypedDict):
     logits: jax.Array
     hidden_states: tp.Optional[jax.Array] = None
     layers_outputs: tp.Optional[tuple[MoxELayerOutput]] = None
 
 
-class MoxEForwardPassOutput(tp.NamedTuple):
+class MoxEForwardPassOutput(tp.TypedDict):
     model: MoxECausalLMOutput
     ce_loss: jax.Array
     z_loss: jax.Array

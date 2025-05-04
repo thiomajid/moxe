@@ -35,6 +35,8 @@ class MoxELayer(nnx.Module):
         self.gate = self.__create_router(config, rngs, dtype=dtype)
         self.experts = get_expert_modules(config, rngs=rngs, dtype=dtype)
 
+        self._expert_branches = [lambda x: expert(x) for expert in self.experts]
+
     def __create_router(self, config: MoxEConfig, rngs: nnx.Rngs, dtype=jnp.float32):
         match config.router_type:
             case SparsityGateType.CONDITIONED_ADDITION:
@@ -62,6 +64,7 @@ class MoxELayer(nnx.Module):
     ):
         h_t = self.sequence_mixer(h_t)
         batch_size, sequence_length, hidden_dim = h_t.shape
+        num_tokens = batch_size * sequence_length  # Calculate max size statically
 
         router_logits: jnp.ndarray | None = None
         gate_output: ConditionedGateOutput | None = None
@@ -85,44 +88,98 @@ class MoxELayer(nnx.Module):
         expert_weights = expert_weights.astype(h_t.dtype)
 
         flat_hidden_states = h_t.reshape(-1, hidden_dim)
-        final_hidden_states = jnp.zeros_like(flat_hidden_states)
+        final_hidden_states = jnp.zeros_like(flat_hidden_states, dtype=h_t.dtype)
         expert_mask = rearrange(
             jax.nn.one_hot(expert_indices, num_classes=self.num_experts),
-            "batch top_k experts -> experts top_k batch",
+            "(b s) top_k experts -> experts top_k (b s)",  # Adjusted rearrange string
+            b=batch_size,
+            s=sequence_length,
         )
 
-        for expert_idx, expert in enumerate(self.experts):
-            # find tokens that are routed to the expert
-            idx, top_x = jnp.where(expert_mask[expert_idx])
+        # Reshape weights for easier indexing within scan body
+        flat_expert_weights = expert_weights.reshape(num_tokens, self.top_k)
 
-            # if top_x.size == 0:  # Skip unused experts
-            #     continue
+        def _scan_body(carry: tuple[jax.Array, int], _):
+            state, expert_idx = carry
+            # expert_mask shape: (num_experts, top_k, num_tokens)
+            current_expert_mask = expert_mask[expert_idx]  # Shape (top_k, num_tokens)
 
-            # if top_x.max() >= flat_hidden_states.shape[0]:
-            #     raise IndexError("Index out of bounds in top_x")
+            # Use jnp.where with size and fill_value=-1. Returns tuple of index arrays.
+            idx_k, idx_token = jnp.where(
+                current_expert_mask, size=num_tokens, fill_value=-1
+            )
+            # idx_k corresponds to top_k dimension, idx_token corresponds to token dimension
+            # Both have shape (num_tokens,) due to the `size` argument.
 
-            # Reshape to 3D for mLSTMBlock
-            current_state = flat_hidden_states[top_x]  # (num_selected, D)
-            current_state = jnp.expand_dims(
-                current_state, axis=1
-            )  # (num_selected, 1, D)
+            # Create mask for valid entries (where token index is not -1)
+            valid_indices_mask = idx_token != -1  # Shape (num_tokens,)
 
-            expert_output = expert(current_state)  # (num_selected, 1, D)
-            expert_output = jnp.squeeze(expert_output, axis=1)  # (num_selected, D)
+            # Use safe indices for gathering (replace -1 with 0 to avoid index errors)
+            safe_idx_k = jnp.where(valid_indices_mask, idx_k, 0)
+            safe_idx_token = jnp.where(valid_indices_mask, idx_token, 0)
 
-            weighted_output = expert_output * router_probs[top_x, idx, None]
-            weighted_output = expert_output * jnp.expand_dims(
-                router_probs[top_x, idx], axis=-1
+            # Gather states using safe_idx_token
+            gathered_states = flat_hidden_states[
+                safe_idx_token
+            ]  # Shape (num_tokens, hidden_dim)
+            # Mask out contributions from padded (-1) indices
+            masked_gathered_states = gathered_states * valid_indices_mask[:, None]
+
+            # Reshape for expert input: (batch=num_tokens, seq=1, dim=hidden_dim)
+            expert_input = jnp.expand_dims(masked_gathered_states, axis=1)
+
+            # Apply expert via lax.switch
+            # Ensure expert functions can handle potentially zeroed inputs gracefully
+            expert_output_padded = lax.switch(
+                expert_idx, self._expert_branches, expert_input
+            )
+            # Squeeze sequence dimension: (num_tokens, hidden_dim)
+            expert_output_squeezed = jnp.squeeze(expert_output_padded, axis=1)
+
+            # Gather weights using safe_idx_token and safe_idx_k
+            # flat_expert_weights shape: (num_tokens, top_k)
+            gathered_weights = flat_expert_weights[
+                safe_idx_token, safe_idx_k
+            ]  # Shape (num_tokens,)
+            # Mask out contributions from padded (-1) indices
+            masked_weights = gathered_weights * valid_indices_mask
+
+            # Apply weights (element-wise)
+            weighted_output = (
+                expert_output_squeezed * masked_weights[:, None]
+            )  # (num_tokens, hidden_dim)
+
+            # Accumulate results using segment_sum
+            # Sum contributions in weighted_output based on the original token index (safe_idx_token)
+            update_for_state = jax.ops.segment_sum(
+                data=weighted_output,
+                segment_ids=safe_idx_token,
+                num_segments=num_tokens,  # Total number of segments = num_tokens
+                indices_are_sorted=False,  # Indices from where are not sorted
             )
 
-            # Accumulate results
-            final_hidden_states = final_hidden_states.at[top_x].add(weighted_output)
+            updated_state = state + update_for_state
 
-        # reshape back to 3D
-        final_hidden_states = final_hidden_states.reshape(
+            # Return new carry state and None for the scanned output per iteration
+            return (updated_state, expert_idx + 1), None
+
+        # Initial state for scan
+        initial_carry = (final_hidden_states, 0)
+
+        # Run the scan over the number of experts
+        final_carry, _ = lax.scan(
+            _scan_body,
+            init=initial_carry,
+            xs=None,  # No input sequence needed for scan itself
+            length=self.num_experts,
+        )
+
+        # Final hidden states are the first element of the final carry tuple
+        final_hidden_states = final_carry[0].reshape(
             batch_size, sequence_length, hidden_dim
         )
 
+        # --- Rest of the function remains the same ---
         z_loss = lax.cond(
             self.router_type == SparsityGateType.STANDARD,
             lambda: router_z_loss(router_logits),

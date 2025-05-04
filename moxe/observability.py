@@ -12,9 +12,8 @@ from moxe.output import MoxEForwardPassOutput, MoxELayerOutput
 
 
 class RouterMetricsWriter:
-    def __init__(self, writer: SummaryWriter, num_devices: int):
+    def __init__(self, writer: SummaryWriter):
         self._writer = writer
-        self.num_devices = num_devices
 
     def add_text(self, text: str, tag: str, global_step: int) -> None:
         """Add text to the writer."""
