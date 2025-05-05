@@ -1,6 +1,7 @@
 import typing as tp
 
 import jax
+from flax import nnx
 
 
 class MoELayerType:
@@ -87,7 +88,7 @@ class ModulationBias:
         ]
 
 
-class ConditionedGateOutput(tp.TypedDict):
+class ConditionedGateOutput(nnx.Module):
     unbiased_logits: jax.Array
     conditioned_logits: jax.Array
     probabilities: jax.Array
@@ -102,8 +103,40 @@ class ConditionedGateOutput(tp.TypedDict):
     d_loss: jax.Array
     group_loss: jax.Array
 
+    def __init__(
+        self,
+        unbiased_logits: jax.Array,
+        conditioned_logits: jax.Array,
+        probabilities: jax.Array,
+        bias: jax.Array,
+        d_t: jax.Array,
+        z_loss: jax.Array,
+        load_balancing_loss: jax.Array,
+        router_entropy: jax.Array,
+        predicted_entropy: jax.Array,
+        expert_load: jax.Array,
+        expert_token_counts: jax.Array,
+        d_loss: jax.Array,
+        group_loss: jax.Array,
+        *,
+        rngs: nnx.Rngs | None = None,
+    ):
+        self.unbiased_logits = unbiased_logits
+        self.conditioned_logits = conditioned_logits
+        self.probabilities = probabilities
+        self.bias = bias
+        self.d_t = d_t
+        self.z_loss = z_loss
+        self.load_balancing_loss = load_balancing_loss
+        self.router_entropy = router_entropy
+        self.predicted_entropy = predicted_entropy
+        self.expert_load = expert_load
+        self.expert_token_counts = expert_token_counts
+        self.d_loss = d_loss
+        self.group_loss = group_loss
 
-class MoxELayerOutput(tp.TypedDict):
+
+class MoxELayerOutput(nnx.Module):
     """
     This class is used to store the output of the MoE layer.
 
@@ -122,22 +155,84 @@ class MoxELayerOutput(tp.TypedDict):
     expert_token_counts: jax.Array
     conditioned_output: tp.Optional[ConditionedGateOutput] = None
 
+    def __init__(
+        self,
+        router_logits: jax.Array,
+        router_probs: jax.Array,
+        hidden_states: jax.Array,
+        z_loss: jax.Array,
+        load_balancing_loss: jax.Array,
+        expert_load: jax.Array,
+        expert_token_counts: jax.Array,
+        conditioned_output: tp.Optional[ConditionedGateOutput] = None,
+        *,
+        rngs: nnx.Rngs | None = None,
+    ):
+        self.router_logits = router_logits
+        self.router_probs = router_probs
+        self.hidden_states = hidden_states
+        self.z_loss = z_loss
+        self.load_balancing_loss = load_balancing_loss
+        self.expert_load = expert_load
+        self.expert_token_counts = expert_token_counts
+        self.conditioned_output = conditioned_output
 
-class MoxEModelOutput(tp.TypedDict):
+
+class MoxEModelOutput(nnx.Module):
     hidden_states: jax.Array
     layers_outputs: tp.Optional[tuple[MoxELayerOutput]] = None
 
+    def __init__(
+        self,
+        hidden_states: jax.Array,
+        layers_outputs: tp.Optional[tuple[MoxELayerOutput]] = None,
+        *,
+        rngs: nnx.Rngs | None = None,
+    ):
+        self.hidden_states = hidden_states
+        self.layers_outputs = layers_outputs
 
-class MoxECausalLMOutput(tp.TypedDict):
+
+class MoxECausalLMOutput(nnx.Module):
     logits: jax.Array
     hidden_states: tp.Optional[jax.Array] = None
     layers_outputs: tp.Optional[tuple[MoxELayerOutput]] = None
 
+    def __init__(
+        self,
+        logits: jax.Array,
+        hidden_states: tp.Optional[jax.Array] = None,
+        layers_outputs: tp.Optional[tuple[MoxELayerOutput]] = None,
+        *,
+        rngs: nnx.Rngs | None = None,
+    ):
+        self.logits = logits
+        self.hidden_states = hidden_states
+        self.layers_outputs = layers_outputs
 
-class MoxEForwardPassOutput(tp.TypedDict):
+
+class MoxEForwardPassOutput(nnx.Module):
     model: MoxECausalLMOutput
     ce_loss: jax.Array
     z_loss: jax.Array
     load_balance_loss: jax.Array
     d_loss: jax.Array
     group_loss: jax.Array
+
+    def __init__(
+        self,
+        model: MoxECausalLMOutput,
+        ce_loss: jax.Array,
+        z_loss: jax.Array,
+        load_balance_loss: jax.Array,
+        d_loss: jax.Array,
+        group_loss: jax.Array,
+        *,
+        rngs: nnx.Rngs | None = None,
+    ):
+        self.model = model
+        self.ce_loss = ce_loss
+        self.z_loss = z_loss
+        self.load_balance_loss = load_balance_loss
+        self.d_loss = d_loss
+        self.group_loss = group_loss

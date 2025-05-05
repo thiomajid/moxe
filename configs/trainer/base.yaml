@@ -12,7 +12,7 @@ compute_d_loss: true
 compute_group_loss: true
 
 # Custom training arguments
-tokenizer: "HuggingFaceTB/SmolLM2-1.7B"
+tokenizer: "HuggingFaceTB/SmolLM2-135M-Instruct"
 train_dataset_url: "roneneldan/TinyStories"
 # train_subset: "cosmopedia-v2"
 train_split: "train"
@@ -46,8 +46,8 @@ gradient_checkpointing: false
 output_dir: "artifacts"
 logging_dir: "artifacts"
 report_to: "tensorboard"
-logging_steps: 200
-save_steps: 200
+logging_steps: 2
+save_steps: 2
 hub_private_repo: false
 save_total_limit: 2
 load_best_model_at_end: true

@@ -3,4 +3,4 @@ defaults:
   - trainer: base
   - model: moxe
 
-dtype: "float16"
+dtype: "float32"

@@ -27,6 +27,7 @@ class RouterMetricsWriter:
             self._writer.scalar(key, value, global_step)
 
     def log_moe_metrics(self, global_step: int, output: MoxEForwardPassOutput):
+        print(output)
         self.add_scalars(
             global_step=global_step,
             scalars={

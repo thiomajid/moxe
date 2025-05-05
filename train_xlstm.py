@@ -58,7 +58,7 @@ def loss_fn(
     # -------------- Z-loss computation --------------------------------
 
     per_layer_z_loss_tree = jtu.tree_map(
-        f=lambda layer: layer[3],
+        f=lambda layer: layer.z_loss,
         tree=output.layers_outputs,
     )
 
@@ -197,8 +197,8 @@ def eval_step(
     model: MoxEForCausalLM,
     metrics: nnx.MultiMetric,
     batch: tuple[jnp.ndarray, ...],
-    z_loss_coef: float,
-    load_balancing_loss_coef: float,
+    z_loss_coef: float = 0.0,
+    load_balancing_loss_coef: float = 0.0,
     d_loss_coef: float = 0.0,
     group_loss_coef: float = 0.0,
 ):
