@@ -13,7 +13,7 @@ def main(cfg: DictConfig):
     config = MoxEConfig.from_dict(OmegaConf.to_container(cfg["model"], resolve=True))
 
     rngs = nnx.Rngs(123)
-    model = MoxEForCausalLM(config, rngs=rngs, dtype=jnp.float16)
+    model = MoxEForCausalLM(config, rngs=rngs, dtype=jnp.float32)
 
     dummy_input = jax.random.randint(
         jax.random.key(123),
@@ -28,6 +28,8 @@ def main(cfg: DictConfig):
         compute_d_loss=True,
         compute_group_loss=True,
     )
+
+    print(output.logits.shape)
 
 
 if __name__ == "__main__":

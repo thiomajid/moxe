@@ -184,9 +184,8 @@ class RouterMetricsWriter:
         }
 
         self.log_individual_scalars(
-            # tag=f"layer_{layer_idx}/sLSTM-to-mLSTM group activation",
-            scalar=groups_probs,
-            global_step=global_step,
+            groups_probs,
+            global_step,
         )
 
         # Add expert usage plots

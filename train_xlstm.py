@@ -453,13 +453,9 @@ def main(cfg: DictConfig):
 
                     # --- Saving ---
                     if global_step % args.save_steps == 0:
-                        logger.info(
-                            f"Saving checkpoint at optimization step {global_step}..."
-                        )
                         state_dir = ckpt_dir / f"{CKPT_PREFIX}-{global_step}"
                         state = nnx.state(model)  # Get model state
                         checkpointer.save(state_dir, state)
-                        logger.info(f"Checkpoint saved to {state_dir}")
 
                     # Break if max_steps reached (e.g., if last micro batch caused an update)
                     if global_step >= max_steps:
@@ -498,7 +494,6 @@ def main(cfg: DictConfig):
             }
             pbar.set_postfix(eval_log_data)
             pbar.refresh()
-            logger.info(f"Epoch {epoch + 1} Evaluation Results: {eval_log_data}")
 
     logger.info("Training completed.")
 
