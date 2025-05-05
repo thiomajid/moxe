@@ -3,11 +3,11 @@
 # Converted to JAX/Flax by Abdoul Majid O. Thiombiano
 from dataclasses import dataclass
 
+import jax
 import jax.numpy as jnp
 from flax import nnx
 
 from .components.init import small_init_initializer
-from .components.util import Identity
 from .xlstm_block_stack import xLSTMBlockStack, xLSTMBlockStackConfig
 
 
@@ -44,7 +44,7 @@ class xLSTMLMModel(nnx.Module):
         self.embedding_dropout = (
             nnx.Dropout(rate=config.dropout, rngs=rngs)
             if config.add_embedding_dropout
-            else Identity()
+            else jax.nn.identity()
         )
 
         self.lm_head = nnx.Linear(

@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import List, Literal, Optional, Union
 
+import jax
 import jax.numpy as jnp
 from flax import nnx
 
@@ -108,7 +109,7 @@ class xLSTMBlockStack(nnx.Module):
                 dtype=dtype,
             )
             if config.add_post_blocks_norm
-            else Identity()
+            else jax.nn.identity()
         )
 
     def _create_blocks(self, config: xLSTMBlockStackConfig, rngs: nnx.Rngs):

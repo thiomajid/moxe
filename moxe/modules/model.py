@@ -1,8 +1,8 @@
+import jax
 import jax.numpy as jnp
 from flax import nnx
 
 from xlstm_jax.components.ln import LayerNorm
-from xlstm_jax.components.util import Identity
 
 from ..config import MoxEConfig
 from ..output import MoxECausalLMOutput, MoxELayerOutput, MoxEModelOutput
@@ -25,7 +25,7 @@ class MoxEModel(nnx.Module):
                 rngs=rngs,
             )
             if config.xlstm.add_embedding_dropout
-            else Identity()
+            else jax.nn.identity()
         )
 
         layer_type = get_moe_layer(config.moe_layer_type)
@@ -66,7 +66,7 @@ class MoxEForCausalLM(nnx.Module):
         self.norm = (
             LayerNorm(config.xlstm.embedding_dim, rngs=rngs, dtype=dtype)
             if config.post_layers_norm
-            else Identity()
+            else jax.nn.identity()
         )
 
         self.lm_head = nnx.Linear(
