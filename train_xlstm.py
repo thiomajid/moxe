@@ -276,12 +276,18 @@ def main(cfg: DictConfig):
         )
     max_steps = args.num_train_epochs * steps_per_epoch
 
+    # Calculate warmup steps based on warmup_ratio
+    warmup_steps = int(args.warmup_ratio * max_steps)
+    logger.info(
+        f"Calculated warmup steps: {warmup_steps} ({args.warmup_ratio=}, {max_steps=})"
+    )
+
     # Define the learning rate schedule
     lr_schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
         peak_value=args.learning_rate,
-        warmup_steps=args.warmup_steps,
-        decay_steps=max_steps - args.warmup_steps,
+        warmup_steps=warmup_steps,  # Use calculated warmup_steps
+        decay_steps=max_steps - warmup_steps,
         end_value=args.learning_rate * 0.1,  # Example: decay to 10% of peak lr
     )
 
