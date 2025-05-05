@@ -348,18 +348,19 @@ def main(cfg: DictConfig):
     logger.info(
         f"  Total micro-batches = {num_train_micro_batches * args.num_train_epochs}"
     )
-    logger.info(f"  Total optimization steps = {max_steps}")
-    logger.info(f"  Warmup steps = {args.warmup_steps}")
+    logger.info(f"Total optimization steps = {max_steps}")
+    logger.info(f"Warmup steps = {args.warmup_steps}")
 
     # --- Training Loop ---
-    with tqdm(total=max_steps, desc="Optim Steps") as pbar:
+    with tqdm(total=max_steps, desc="Training loop") as pbar:
         for epoch in range(args.num_train_epochs):
             logger.info(f"Starting Epoch {epoch + 1}/{args.num_train_epochs}")
             metrics.reset()  # Reset train metrics at the start of each epoch
+            pbar.set_description(
+                desc=f"Training loop - Epoch {epoch + 1} / {args.num_train_epochs}"
+            )
 
-            for micro_step, batch in enumerate(
-                tqdm(train_loader, desc=f"Epoch {epoch + 1} Micro-steps", leave=False)
-            ):
+            for micro_step, batch in enumerate(tqdm(train_loader)):
                 # Prepare batch
                 input_ids = jnp.array(batch["input_ids"])
                 labels = jnp.array(batch["labels"])
