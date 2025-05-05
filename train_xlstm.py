@@ -356,11 +356,19 @@ def main(cfg: DictConfig):
         for epoch in range(args.num_train_epochs):
             logger.info(f"Starting Epoch {epoch + 1}/{args.num_train_epochs}")
             metrics.reset()  # Reset train metrics at the start of each epoch
+            # Update outer pbar description for the current epoch
             pbar.set_description(
-                desc=f"Training loop - Epoch {epoch + 1} / {args.num_train_epochs}"
+                desc=f"Training loop - Epoch {epoch + 1}/{args.num_train_epochs}"
             )
 
-            for micro_step, batch in enumerate(tqdm(train_loader)):
+            # Inner loop for micro-batches with its own tqdm, set leave=False
+            for micro_step, batch in enumerate(
+                tqdm(
+                    train_loader,
+                    desc=f"Epoch {epoch + 1} Micro-batches",
+                    leave=False,  # Make the inner bar disappear after completion
+                )
+            ):
                 # Prepare batch
                 input_ids = jnp.array(batch["input_ids"])
                 labels = jnp.array(batch["labels"])
