@@ -44,7 +44,7 @@ class xLSTMLMModel(nnx.Module):
         self.embedding_dropout = (
             nnx.Dropout(rate=config.dropout, rngs=rngs)
             if config.add_embedding_dropout
-            else jax.nn.identity()
+            else jax.nn.identity
         )
 
         self.lm_head = nnx.Linear(

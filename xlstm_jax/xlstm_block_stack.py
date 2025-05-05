@@ -109,7 +109,7 @@ class xLSTMBlockStack(nnx.Module):
                 dtype=dtype,
             )
             if config.add_post_blocks_norm
-            else jax.nn.identity()
+            else jax.nn.identity
         )
 
     def _create_blocks(self, config: xLSTMBlockStackConfig, rngs: nnx.Rngs):
