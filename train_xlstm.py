@@ -13,7 +13,6 @@ import optax
 import orbax.checkpoint as ocp
 from einops import rearrange
 from flax import nnx
-from flax.metrics.tensorboard import SummaryWriter
 from huggingface_hub import create_repo, repo_exists, upload_folder
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
@@ -320,7 +319,7 @@ def main(cfg: DictConfig):
         "eval_perplexity": [],
     }
 
-    metrics_writer = RouterMetricsWriter(writer=SummaryWriter(log_dir=args.output_dir))
+    metrics_writer = RouterMetricsWriter(log_dir=args.output_dir)
 
     # checkpoint manager
     ckpt_dir = Path(args.logging_dir).absolute()
@@ -396,7 +395,7 @@ def main(cfg: DictConfig):
                         accumulated_grads,
                     )
 
-                    metrics_writer.add_scalars(
+                    metrics_writer.log_individual_scalars(
                         global_step=global_step,
                         scalars={
                             "train/grad_norm": grad_norm,

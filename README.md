@@ -1,0 +1,1 @@
+https://aki-gm-resources-oversea.aki-game.net/aki/gacha/index.html#/record?svr_id=6eb2a235b30d05efd77bedb5cf60999e&player_id=600155681&lang=en&gacha_id=100022&gacha_type=1&svr_area=global&record_id=bb7f19156a33011b2482c5efa0524f6d&resources_id=19d16b1efcc11941c8fefc4ffce37842&platform=Android
