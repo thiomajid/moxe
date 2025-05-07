@@ -15,9 +15,9 @@ post_layers_norm: false
 
 xlstm:
   vocab_size: 49_152
-  context_length: 128
+  context_length: 10
   num_blocks: 1
-  embedding_dim: 32
+  embedding_dim: 8
   add_post_blocks_norm: true
 
   mlstm_block:

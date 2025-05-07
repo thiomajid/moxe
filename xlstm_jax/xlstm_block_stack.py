@@ -161,8 +161,14 @@ class xLSTMBlockStack(nnx.Module):
             Processed output tensor of shape [B, S, D]
         """
 
-        for block in self.blocks:
-            x = block(x)
+        def _block_scan(carry: jax.Array, block_idx: int):
+            new_state = jax.lax.switch(block_idx, self.blocks, carry)
+            return new_state, None
+
+        x, _ = jax.lax.scan(f=_block_scan, init=x, xs=jnp.arange(len(self.blocks)))
+
+        # for block in self.blocks:
+        #     x = block(x)
 
         x = self.post_blocks_norm(x)
 

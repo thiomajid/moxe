@@ -17,7 +17,7 @@ def main(cfg: DictConfig):
 
     dummy_input = jax.random.randint(
         jax.random.key(123),
-        shape=(2, 10),
+        shape=(2, 5),
         minval=1,
         maxval=config.xlstm.vocab_size,
     )

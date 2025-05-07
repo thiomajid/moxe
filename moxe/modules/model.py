@@ -40,12 +40,39 @@ class MoxEModel(nnx.Module):
         compute_d_loss: bool = True,
         compute_group_loss: bool = True,
     ):
+        h_t = self.token_embedding(input_ids)
+        # h_t = self.embedding_dropout(h_t)
+
+        # @nnx.scan(
+        #     # in_axes=(0, nnx.Carry),
+        #     # out_axes=(0, nnx.Carry),
+        #     length=len(self.layers),
+        # )
+        # def _layer_scan_body(carry):
+        #     current_h_t, current_layer_idx = carry
+        #     layer_out: MoxELayerOutput = jax.lax.switch(
+        #         current_layer_idx,
+        #         self.layers,
+        #         current_h_t,
+        #         compute_d_loss,
+        #         compute_group_loss,
+        #     )
+
+        #     updated_h_t = layer_out.hidden_states
+        #     new_carry_output = (updated_h_t, current_layer_idx + 1)
+        #     y_for_stacking = layer_out
+
+        #     return new_carry_output, y_for_stacking
+
+        # init_carry = (h_t, jnp.array(0, dtype=jnp.int32))
+        # final_carry_components, stacked_y_outputs = _layer_scan_body(init_carry)
+
+        # h_t = final_carry_components[0]
+        # layers_outputs = stacked_y_outputs if return_layers_outputs else None
+
         layers_outputs: tuple[MoxELayerOutput, ...] | None = (
             () if return_layers_outputs else None
         )
-        h_t = self.token_embedding(input_ids)
-        h_t = self.embedding_dropout(h_t)
-
         for layer in self.layers:
             layer_out = layer(
                 h_t,
@@ -79,7 +106,6 @@ class MoxEForCausalLM(nnx.Module):
         )
 
         if config.xlstm.tie_weights:
-            # weight tying with token embedding and lm_head
             self.lm_head.kernel = self.moe.token_embedding.embedding
 
     def __call__(
