@@ -136,6 +136,7 @@ class ConditionedGateOutput(nnx.Module):
         self.group_loss = group_loss
 
 
+# @flax.struct.dataclass
 class MoxELayerOutput(nnx.Module):
     """
     This class is used to store the output of the MoE layer.

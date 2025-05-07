@@ -109,10 +109,8 @@ class MoxELayer(nnx.Module):
             )
         )
 
-        # Transpose to (B*S, E, D) for easier weighting
-        all_expert_outputs = rearrange(all_expert_outputs, "e b s d -> e (b s) d")
-        # here b = B*S
-        all_expert_outputs = rearrange(all_expert_outputs, "e b d -> b e d")
+        # Transpose (E, B, S, D) to (B*S, E, D) for easier weighting
+        all_expert_outputs = rearrange(all_expert_outputs, "e b s d -> (b s) e d")
 
         # all_expert_outputs = jnp.transpose(all_expert_outputs, (1, 0, 2))
 
