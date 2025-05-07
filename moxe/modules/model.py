@@ -41,7 +41,7 @@ class MoxEModel(nnx.Module):
         compute_group_loss: bool = True,
     ):
         h_t = self.token_embedding(input_ids)
-        # h_t = self.embedding_dropout(h_t)
+        h_t = self.embedding_dropout(h_t)
 
         # @nnx.scan(
         #     # in_axes=(0, nnx.Carry),
