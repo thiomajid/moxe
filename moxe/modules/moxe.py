@@ -76,7 +76,8 @@ class MoxELayer(nnx.Module):
             )
             gate_logits = gate_output.conditioned_logits
         else:
-            gate_logits = self.gate(h_t)
+            flat_h_t = h_t.reshape(-1, D)
+            gate_logits = self.gate(flat_h_t)
 
         router_probs = jax.nn.softmax(gate_logits, axis=1)
         top_k_weights, top_k_indices = lax.top_k(router_probs, self.top_k)
