@@ -38,8 +38,6 @@ class MoxELayer(nnx.Module):
             config, rngs=rngs, dtype=dtype
         )
 
-        self._expert_branches = [lambda x: expert(x) for expert in self.experts]
-
     def __create_router(self, config: MoxEConfig, rngs: nnx.Rngs, dtype=jnp.float32):
         match config.router_type:
             case SparsityGateType.CONDITIONED_ADDITION:
