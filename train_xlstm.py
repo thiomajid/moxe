@@ -371,14 +371,15 @@ def main(cfg: DictConfig):
                     leave=False,  # Make the inner bar disappear after completion
                 )
             ):
-                # print("Batch type ---->", type(batch))
-                # print(batch)
-
-                # raise SystemExit(0)
+                print("Batch type ²---->", type(batch))
+                print(batch)
+                print(batch["input_ids"].shape)
+                raise SystemExit(0)
 
                 # Prepare batch
-                input_ids = jnp.array(batch[:]["input_ids"])
-                labels = jnp.array(batch[:]["labels"], dtype=jnp.int32)
+
+                input_ids = jnp.array(batch["input_ids"])
+                labels = jnp.array(batch["labels"], dtype=jnp.int32)
                 _batch = (input_ids, labels)
 
                 # Compute gradients for the micro-batch and update metrics
