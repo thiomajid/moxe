@@ -371,10 +371,10 @@ def main(cfg: DictConfig):
                     leave=False,  # Make the inner bar disappear after completion
                 )
             ):
-                # print("Batch type ---->", type(batch))
-                # print(batch)
+                print("Batch type ---->", type(batch))
+                print(batch)
 
-                # raise SystemExit(0)
+                raise SystemExit(0)
 
                 # Prepare batch
                 input_ids = jnp.array(batch[:]["input_ids"])
