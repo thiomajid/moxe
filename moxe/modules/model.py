@@ -33,14 +33,14 @@ class MoxEModel(nnx.Module):
             layer_type(config, rngs=rngs, dtype=dtype) for _ in range(config.num_layers)
         ]
 
-        self._layer_branches = [
-            lambda state, compute_d_loss, compute_group_loss: layer(
-                state,
-                compute_d_loss=compute_d_loss,
-                compute_group_loss=compute_group_loss,
-            )
-            for layer in self.layers
-        ]
+        # self._layer_branches = [
+        #     lambda state, compute_d_loss, compute_group_loss: layer(
+        #         state,
+        #         compute_d_loss=compute_d_loss,
+        #         compute_group_loss=compute_group_loss,
+        #     )
+        #     for layer in self.layers
+        # ]
 
     def __call__(
         self,
@@ -52,41 +52,41 @@ class MoxEModel(nnx.Module):
         h_t = self.token_embedding(input_ids)
         h_t = self.embedding_dropout(h_t)
 
-        @nnx.scan(
-            length=len(self.layers),
-            in_axes=(nnx.Carry,),
-            out_axes=(nnx.Carry, 0),
-        )
-        def _layer_scan(carry):
-            current_h_t, layer_idx = carry
-            layer_out: MoxELayerOutput = nnx.switch(
-                layer_idx,
-                self._layer_branches,
-                current_h_t,
-                compute_d_loss,
-                compute_group_loss,
-            )
-
-            updated_h_t = layer_out.hidden_states
-            new_carry = (updated_h_t, layer_idx + 1)
-            return new_carry, layer_out
-
-        init_carry = (h_t, jnp.array(0, dtype=jnp.int32))
-        (h_t, _), layers_outputs = _layer_scan(init_carry)
-
-        # layers_outputs: tuple[MoxELayerOutput, ...] | None = (
-        #     () if return_layers_outputs else None
+        # @nnx.scan(
+        #     length=len(self.layers),
+        #     in_axes=(nnx.Carry,),
+        #     out_axes=(nnx.Carry, 0),
         # )
-        # for layer in self.layers:
-        #     layer_out = layer(
-        #         h_t,
-        #         compute_d_loss=compute_d_loss,
-        #         compute_group_loss=compute_group_loss,
+        # def _layer_scan(carry):
+        #     current_h_t, layer_idx = carry
+        #     layer_out: MoxELayerOutput = nnx.switch(
+        #         layer_idx,
+        #         self._layer_branches,
+        #         current_h_t,
+        #         compute_d_loss,
+        #         compute_group_loss,
         #     )
-        #     h_t = layer_out.hidden_states
 
-        #     if return_layers_outputs:
-        #         layers_outputs += (layer_out,)
+        #     updated_h_t = layer_out.hidden_states
+        #     new_carry = (updated_h_t, layer_idx + 1)
+        #     return new_carry, layer_out
+
+        # init_carry = (h_t, jnp.array(0, dtype=jnp.int32))
+        # (h_t, _), layers_outputs = _layer_scan(init_carry)
+
+        layers_outputs: tuple[MoxELayerOutput, ...] | None = (
+            () if return_layers_outputs else None
+        )
+        for layer in self.layers:
+            layer_out = layer(
+                h_t,
+                compute_d_loss=compute_d_loss,
+                compute_group_loss=compute_group_loss,
+            )
+            h_t = layer_out.hidden_states
+
+            if return_layers_outputs:
+                layers_outputs += (layer_out,)
 
         return MoxEModelOutput(layers_outputs=layers_outputs, hidden_states=h_t)
 
