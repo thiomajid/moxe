@@ -266,7 +266,9 @@ def main(cfg: DictConfig):
     train_loader, eval_loader = create_dataloaders(logger, args, tokenizer, config)
 
     # Calculate total training steps for the scheduler
-    num_train_micro_batches = len(train_loader._data_source) // args.per_device_train_batch_size
+    num_train_micro_batches = (
+        len(train_loader._data_source) // args.per_device_train_batch_size
+    )
     if args.gradient_accumulation_steps <= 0:
         raise ValueError("gradient_accumulation_steps must be positive")
     steps_per_epoch = num_train_micro_batches // args.gradient_accumulation_steps
@@ -369,9 +371,14 @@ def main(cfg: DictConfig):
                     leave=False,  # Make the inner bar disappear after completion
                 )
             ):
+                # print("Batch type ---->", type(batch))
+                # print(batch)
+
+                # raise SystemExit(0)
+
                 # Prepare batch
-                input_ids = jnp.array(batch["input_ids"])
-                labels = jnp.array(batch["labels"])
+                input_ids = jnp.array(batch[:]["input_ids"])
+                labels = jnp.array(batch[:]["labels"], dtype=jnp.int32)
                 _batch = (input_ids, labels)
 
                 # Compute gradients for the micro-batch and update metrics

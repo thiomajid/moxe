@@ -11,6 +11,7 @@ from transformers import AutoTokenizer, DataCollatorForLanguageModeling
 from ..config import MoxEConfig
 from .arguments import CustomArgs
 import grain.python as grain
+import jax.numpy as jnp
 
 
 def get_dataset(
@@ -140,12 +141,40 @@ class HubDataSource(grain.RandomAccessDataSource):
         return len(self._dataset)
 
 
-class DataCollatorTransformer(grain.MapTransform):
-    def __init__(self, collator:DataCollatorForLanguageModeling) -> None:
+class DataCollatatorTransform(grain.MapTransform):
+    """
+    Applies a collator to a dataset element and converts the specified columns to **JAX** arrays.
+    This transform uses a Hugging Face **DataCollatorForLanguageModeling** to process a dataset element,
+    then converts the specified columns to **JAX** arrays, removing any other columns.
+
+    Attributes:
+        collator: A Hugging Face DataCollatorForLanguageModeling instance.
+        target_columns: A list of strings representing the columns to keep and convert to JAX arrays.
+    """
+
+    def __init__(
+        self,
+        collator: DataCollatorForLanguageModeling,
+        target_columns: list[str],
+    ):
+        super().__init__()
+
         self.collator = collator
+        self.target_columns = target_columns
 
     def map(self, element):
+        # if not isinstance(element, list):
+        #     element = [element]
+
+        # batch: dict = self.collator.numpy_call(element)
+        # result = {}
+        # for key in self.target_columns:
+        #     if key in batch:
+        #         result[key] = jnp.array(batch[key])
+
+        # return result
         return self.collator([element])
+
 
 def create_dataloaders(
     logger: logging.Logger,
@@ -186,7 +215,8 @@ def create_dataloaders(
         worker_count=4,
         worker_buffer_size=2,
         operations=[
-            DataCollatorTransformer(
+            DataCollatatorTransform(
+                target_columns=["input_ids", "labels", "attention_mask"],
                 collator=DataCollatorForLanguageModeling(
                     tokenizer=tokenizer,
                     mlm=False,
@@ -230,7 +260,8 @@ def create_dataloaders(
         worker_count=4,
         worker_buffer_size=2,
         operations=[
-            DataCollatorTransformer(
+            DataCollatatorTransform(
+                target_columns=["input_ids", "labels", "attention_mask"],
                 collator=DataCollatorForLanguageModeling(
                     tokenizer=tokenizer,
                     mlm=False,
