@@ -266,7 +266,7 @@ def main(cfg: DictConfig):
     train_loader, eval_loader = create_dataloaders(logger, args, tokenizer, config)
 
     # Calculate total training steps for the scheduler
-    num_train_micro_batches = len(train_loader)
+    num_train_micro_batches = len(train_loader._data_source) // args.per_device_train_batch_size
     if args.gradient_accumulation_steps <= 0:
         raise ValueError("gradient_accumulation_steps must be positive")
     steps_per_epoch = num_train_micro_batches // args.gradient_accumulation_steps
