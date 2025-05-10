@@ -332,13 +332,30 @@ def main(cfg: DictConfig):
     # checkpoint manager
     ckpt_dir = Path(args.logging_dir).absolute()
     ckpt_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
-    checkpointer = ocp.PyTreeCheckpointer()
-    CKPT_PREFIX = "state"
+
+    # Options for CheckpointManager: keep best 3 based on eval_perplexity
+    # Lower perplexity is better.
+    options = ocp.CheckpointManagerOptions(
+        max_to_keep=3,
+        best_fn=lambda metrics: metrics["eval_perplexity"],
+        best_mode="min",
+        create=True,
+    )
+    # The PyTreeCheckpointer handles the actual saving/loading of the PyTree (model state)
+    # The CheckpointManager uses the checkpointer to save/restore and manages multiple checkpoints
+    manager = ocp.CheckpointManager(
+        ckpt_dir,
+        ocp.PyTreeCheckpointer(),  # Using a PyTreeCheckpointer
+        options=options,
+    )
 
     # Start training with progress bar being updated and gradient accumulation
     # if needed and descriptive messages
     global_step = 0  # Tracks optimizer steps
     accumulated_grads = None
+    latest_eval_metrics_for_ckpt = {
+        "eval_perplexity": float("inf")
+    }  # Initialize with a high value for 'min' mode
 
     logger.info("Starting training loop...")
     logger.info(f"Num Epochs = {args.num_train_epochs}")
@@ -377,8 +394,15 @@ def main(cfg: DictConfig):
                 # raise SystemExit(0)
 
                 # Prepare batch - Squeeze on axis 0 because Grain creates an additional axis
-                input_ids = jnp.array(batch["input_ids"]).squeeze(0)
-                labels = jnp.array(batch["labels"], dtype=jnp.int32).squeeze(0)
+                input_ids = jnp.array(batch["input_ids"])
+                labels = jnp.array(batch["labels"], dtype=jnp.int32)
+
+                if input_ids.ndim == 3 and input_ids.shape[0] == 1:
+                    input_ids = input_ids.squeeze(0)
+
+                if labels.ndim == 3 and labels.shape[0] == 1:
+                    labels = labels.squeeze(0)
+
                 _batch = (input_ids, labels)
 
                 # Compute gradients for the micro-batch and update metrics
@@ -469,9 +493,18 @@ def main(cfg: DictConfig):
 
                     # --- Saving ---
                     if global_step % args.save_steps == 0:
-                        state_dir = ckpt_dir / f"{CKPT_PREFIX}-{global_step}"
                         state = nnx.state(model)  # Get model state
-                        checkpointer.save(state_dir, state)
+                        # Save with the manager, providing the current global_step and latest eval metrics
+                        # The manager will decide if this checkpoint is among the top 3
+                        manager.save(
+                            global_step,
+                            args=ocp.args.StandardSave(state),
+                            metrics=latest_eval_metrics_for_ckpt,
+                        )
+                        manager.wait_until_finished()  # Ensure saving completes before proceeding
+                        logger.info(
+                            f"Checkpoint saved at step {global_step} with metrics {latest_eval_metrics_for_ckpt}"
+                        )
 
                     # Break if max_steps reached (e.g., if last micro batch caused an update)
                     if global_step >= max_steps:
@@ -490,12 +523,49 @@ def main(cfg: DictConfig):
                 desc=f"Evaluating Epoch {epoch + 1}",
                 leave=False,
             ):
+                # Prepare batch - Squeeze on axis 0 if Grain creates an additional axis
                 input_ids = jnp.array(batch["input_ids"])
-                labels = jnp.array(batch["labels"])
+                labels = jnp.array(batch["labels"], dtype=jnp.int32)
+
+                # Assuming eval_loader might also produce an extra leading dimension like train_loader
+                if input_ids.ndim == 3 and input_ids.shape[0] == 1:
+                    input_ids = input_ids.squeeze(0)
+                if (
+                    labels.ndim == 3 and labels.shape[0] == 1
+                ):  # Squeeze labels if they also have extra dim
+                    labels = labels.squeeze(0)
+
                 _batch = (input_ids, labels)
-                eval_step(model=model, metrics=eval_metrics, batch=_batch)
+                eval_step(
+                    model=model, metrics=eval_metrics, batch=_batch
+                )  # Uses default 0.0 for aux loss coeffs
 
             computed_eval_metrics = eval_metrics.compute()
+
+            # Update the metric used for checkpoint manager ranking
+            if "perplexity" in computed_eval_metrics:
+                current_eval_perplexity = float(computed_eval_metrics["perplexity"])
+                latest_eval_metrics_for_ckpt = {
+                    "eval_perplexity": current_eval_perplexity
+                }
+                logger.info(
+                    f"Epoch {epoch + 1} evaluation: Perplexity = {current_eval_perplexity:.4f}"
+                )
+            elif (
+                "loss" in computed_eval_metrics
+            ):  # Fallback if perplexity is not available
+                current_eval_loss = float(computed_eval_metrics["loss"])
+                latest_eval_metrics_for_ckpt = {
+                    "eval_perplexity": current_eval_loss
+                }  # Store loss under expected key
+                logger.info(
+                    f"Epoch {epoch + 1} evaluation: Loss = {current_eval_loss:.4f} (used as perplexity for ranking)"
+                )
+            else:
+                logger.warning(
+                    "Neither perplexity nor loss found in evaluation metrics. Checkpoint ranking might not be effective."
+                )
+
             for metric, value in computed_eval_metrics.items():
                 history[f"eval_{metric}"].append(
                     {
@@ -528,59 +598,69 @@ def main(cfg: DictConfig):
         json.dump(asdict(config), f, indent=4)
     logger.info(f"Model config saved to {artifacts_dir / 'config.json'}")
 
-    # Find and copy the best checkpoint based on eval perplexity (or loss if perplexity not available)
-    eval_metric_key = (
-        "eval_perplexity"
-        if "eval_perplexity" in history and history["eval_perplexity"]
-        else "eval_loss"
-    )
-    if history[eval_metric_key]:
-        # Sort ascending (lower is better for loss/perplexity)
-        sorted_eval_metric = sorted(history[eval_metric_key], key=lambda x: x["value"])
-        best_ckpt_info = sorted_eval_metric[0]
-        # Ensure step is integer before using in path formatting
-        best_step = int(best_ckpt_info["step"])
-        metric_value = best_ckpt_info["value"]
+    # Ensure the very final model state is considered by the manager.
+    # This will save it with the latest known evaluation metrics.
+    # If this state is one of the best, the manager will keep it.
+    if global_step > 0:  # Ensure some training happened
+        final_model_state = nnx.state(model)
         logger.info(
-            f"Best checkpoint based on {eval_metric_key}: step {best_step} with value: {metric_value:.4f}"
+            f"Saving final model state at step {global_step} to be considered by CheckpointManager with metrics {latest_eval_metrics_for_ckpt}."
         )
+        manager.save(
+            global_step,
+            args=ocp.args.StandardSave(final_model_state),
+            metrics=latest_eval_metrics_for_ckpt,
+        )
+        manager.wait_until_finished()  # Wait for this final save to complete.
 
-        best_ckpt_dir_path = ckpt_dir / f"{CKPT_PREFIX}-{best_step}"
-        if best_ckpt_dir_path.exists():
-            target_ckpt_path = artifacts_dir / CKPT_PREFIX
+    # Copy the best checkpoint identified by the manager to the artifacts directory
+    best_step_to_deploy = manager.best_step()
+
+    target_ckpt_deployment_path = (
+        artifacts_dir / "model_checkpoint"
+    )  # Standard name for the best model
+
+    if best_step_to_deploy is not None:
+        logger.info(
+            f"Best checkpoint according to CheckpointManager is at step {best_step_to_deploy}."
+        )
+        # CheckpointManager stores checkpoints in subdirectories named by step, e.g., <ckpt_dir>/<step>/
+        source_ckpt_dir = manager.directory / str(best_step_to_deploy)
+
+        if source_ckpt_dir.exists():
             logger.info(
-                f"Copying best checkpoint from {best_ckpt_dir_path} to {target_ckpt_path}"
+                f"Copying best checkpoint from {source_ckpt_dir} to {target_ckpt_deployment_path}"
             )
-            shutil.copytree(best_ckpt_dir_path, target_ckpt_path, dirs_exist_ok=True)
+            if target_ckpt_deployment_path.exists():
+                shutil.rmtree(target_ckpt_deployment_path)
+            shutil.copytree(
+                source_ckpt_dir, target_ckpt_deployment_path, dirs_exist_ok=False
+            )
         else:
-            logger.warning(
-                f"Best checkpoint directory {best_ckpt_dir_path} not found. Saving the last checkpoint instead."
+            logger.error(
+                f"Best checkpoint directory {source_ckpt_dir} not found. This indicates an issue with CheckpointManager state or file system."
             )
-            # Fallback: save the last checkpoint if the best one isn't found (e.g., if saving failed)
-            last_ckpt_step = (
-                global_step  # Assuming global_step holds the last step number
-            )
-            last_ckpt_dir_path = ckpt_dir / f"{CKPT_PREFIX}-{last_ckpt_step}"
-            if last_ckpt_dir_path.exists():
-                target_ckpt_path = artifacts_dir / CKPT_PREFIX
-                logger.info(
-                    f"Copying last checkpoint from {last_ckpt_dir_path} to {target_ckpt_path}"
-                )
-                shutil.copytree(
-                    last_ckpt_dir_path, target_ckpt_path, dirs_exist_ok=True
-                )
-            else:
-                logger.error("Could not find last checkpoint to save.")
-
     else:
         logger.warning(
-            "No evaluation metrics found to determine the best checkpoint. Saving the final model state."
+            "CheckpointManager did not identify a best checkpoint (e.g., no checkpoints saved or metrics always 'inf')."
         )
-        # Save the final model state directly if no checkpoints were saved or eval was skipped
-        final_state_path = artifacts_dir / CKPT_PREFIX
-        final_state = nnx.state(model)
-        checkpointer.save(final_state_path, args=ocp.args.StandardSave(final_state))
-        logger.info(f"Final model state saved to {final_state_path}")
+        # Fallback: if no "best" was found by manager, attempt to save the absolute final model state directly.
+        if global_step > 0:
+            final_model_state = nnx.state(model)
+            logger.info(
+                f"Saving current final model state directly to {target_ckpt_deployment_path} as a fallback, as no best checkpoint was identified by manager."
+            )
+            if target_ckpt_deployment_path.exists():
+                shutil.rmtree(target_ckpt_deployment_path)
+            # Use a basic checkpointer for this direct save.
+            ocp.PyTreeCheckpointer().save(
+                target_ckpt_deployment_path,
+                args=ocp.args.StandardSave(final_model_state),
+            )
+        else:
+            logger.error(
+                "No training steps were completed, and no best checkpoint found. Cannot save a model."
+            )
 
     # Save tokenizer
     tokenizer.save_pretrained(artifacts_dir)
