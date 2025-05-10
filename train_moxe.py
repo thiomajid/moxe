@@ -352,17 +352,17 @@ def main(cfg: DictConfig):
     grad_structure = None  # To store the structure for zero init
 
     logger.info("Starting training loop...")
-    logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Micro Batch size = {args.per_device_train_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+    logger.info(f"Num Epochs = {args.num_train_epochs}")
+    logger.info(f"Micro Batch size = {args.per_device_train_batch_size}")
+    logger.info(f"Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(
-        f"  Effective Batch size = {args.per_device_train_batch_size * args.gradient_accumulation_steps}"
+        f"Effective Batch size = {args.per_device_train_batch_size * args.gradient_accumulation_steps}"
     )
     logger.info(
-        f"  Total micro-batches = {num_train_micro_batches * args.num_train_epochs}"
+        f"Total micro-batches = {num_train_micro_batches * args.num_train_epochs}"
     )
-    logger.info(f"  Total optimization steps = {max_steps}")
-    logger.info(f"  Warmup steps = {args.warmup_steps}")
+    logger.info(f"Total optimization steps = {max_steps}")
+    logger.info(f"Warmup steps = {args.warmup_steps}")
 
     # --- Training Loop ---
     with tqdm(total=max_steps, desc="Optim Steps") as pbar:
@@ -375,7 +375,7 @@ def main(cfg: DictConfig):
             ):
                 # Prepare batch
                 input_ids = jnp.array(batch["input_ids"])
-                labels = jnp.array(batch["labels"])
+                labels = jnp.array(batch["labels"], dtype=jnp.int32)
                 _batch = (input_ids, labels)
 
                 # Compute gradients for the micro-batch and update metrics
@@ -385,10 +385,6 @@ def main(cfg: DictConfig):
 
                 # Initialize or accumulate gradients
                 if accumulated_grads is None:
-                    # Get structure from the first computed grads
-                    grad_structure = jtu.tree_map(
-                        lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), grads
-                    )
                     accumulated_grads = jtu.tree_map(jnp.zeros_like, grads)
 
                 accumulated_grads = jtu.tree_map(

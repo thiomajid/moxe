@@ -5,12 +5,15 @@ from typing import Literal, Optional, Union
 
 from datasets import Dataset as HfDataset
 from datasets import IterableDataset, load_dataset, load_from_disk
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer, DataCollatorForLanguageModeling
 
 from ..config import MoxEConfig
 from .arguments import CustomArgs
+import grain.python as grain
+
+
+
 
 
 def get_dataset(
@@ -128,6 +131,25 @@ def get_dataset(
     return tokenized_data
 
 
+class HubDataSource(grain.RandomAccessDataSource):
+    def __init__(self, dataset:HfDataset) -> None:
+        self._dataset = dataset
+
+
+    def __getitem__(self, record_key):
+        return self._dataset[record_key]
+
+    def __len__(self) -> int:
+        return len(self._dataset)
+
+
+class DataCollatorTransformer(grain.MapTransform):
+    def __init__(self, collator:DataCollatorForLanguageModeling) -> None:
+        self.collator = collator
+
+    def map(self, element):
+        return self.collator(element)
+
 def create_dataloaders(
     logger: logging.Logger,
     args: CustomArgs,
@@ -138,7 +160,7 @@ def create_dataloaders(
         f"Loading training dataset from {args.train_dataset_url} with {args.train_samples} samples"
     )
 
-    train_dataset = get_dataset(
+    train_data = get_dataset(
         hub_url=args.train_dataset_url,
         subset=args.train_subset,
         features=args.features,
@@ -150,13 +172,39 @@ def create_dataloaders(
         trust_remote_code=args.trust_remote_code,
     )
 
-    train_dataset.set_format("numpy", columns=["input_ids", "attention_mask", "length"])
+    train_data.set_format("numpy", columns=["input_ids", "attention_mask", "length"])
+    train_source = HubDataSource(train_data)
+
+    train_sampler = grain.IndexSampler(
+        len(train_source),
+        shuffle=True,
+        seed=args.seed,
+        shard_options=grain.NoSharding(),
+        num_epochs=int(args.num_train_epochs),
+    )
+
+    train_loader = grain.DataLoader(
+        data_source=train_source,
+        sampler=train_sampler,
+        worker_count=4,
+        worker_buffer_size=2,
+        operations=[
+            DataCollatorTransformer(
+                collator=DataCollatorForLanguageModeling(
+                    tokenizer=tokenizer,
+                    mlm=False,
+                    return_tensors="np",
+                )
+            ),
+            grain.Batch(args.per_device_train_batch_size, drop_remainder=True)
+        ]
+    )
 
     logger.info(
         f"Loading evaluation dataset from {args.eval_dataset_url} with {args.eval_samples} samples"
     )
 
-    eval_dataset = get_dataset(
+    eval_data = get_dataset(
         hub_url=args.eval_dataset_url,
         subset=args.eval_subset,
         features=args.features,
@@ -168,31 +216,32 @@ def create_dataloaders(
         trust_remote_code=args.trust_remote_code,
     )
 
-    eval_dataset.set_format("numpy", columns=["input_ids", "attention_mask", "length"])
+    eval_data.set_format("numpy", columns=["input_ids", "attention_mask", "length"])
+    eval_source = HubDataSource(eval_data)
 
-    logger.info("Initializing trainer...")
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=False,
-        return_tensors="np",
-    )
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.per_device_train_batch_size,
-        collate_fn=data_collator,
-        num_workers=args.dataloader_num_workers,
-        shuffle=True,
-        drop_last=True,  # Important for grad accumulation if dataset size isn't divisible
-    )
-
-    eval_loader = DataLoader(
-        eval_dataset,
-        batch_size=args.per_device_eval_batch_size,
-        collate_fn=data_collator,
-        num_workers=args.dataloader_num_workers,
+    eval_sampler = grain.IndexSampler(
+        len(eval_source),
         shuffle=False,
-        drop_last=False,
+        seed=args.seed,
+        shard_options=grain.NoSharding(),
+        num_epochs=int(args.num_train_epochs)
+    )
+
+    eval_loader = grain.DataLoader(
+        data_source=eval_source,
+        sampler=eval_sampler,
+        worker_count=4,
+        worker_buffer_size=2,
+        operations=[
+            DataCollatorTransformer(
+                collator=DataCollatorForLanguageModeling(
+                    tokenizer=tokenizer,
+                    mlm=False,
+                    return_tensors="np",
+                )
+            ),
+            grain.Batch(args.per_device_eval_batch_size)
+        ]
     )
 
     return train_loader, eval_loader

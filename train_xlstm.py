@@ -339,14 +339,14 @@ def main(cfg: DictConfig):
     accumulated_grads = None
 
     logger.info("Starting training loop...")
-    logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Micro Batch size = {args.per_device_train_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+    logger.info(f"Num Epochs = {args.num_train_epochs}")
+    logger.info(f"Micro Batch size = {args.per_device_train_batch_size}")
+    logger.info(f"Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(
-        f"  Effective Batch size = {args.per_device_train_batch_size * args.gradient_accumulation_steps}"
+        f"Effective Batch size = {args.per_device_train_batch_size * args.gradient_accumulation_steps}"
     )
     logger.info(
-        f"  Total micro-batches = {num_train_micro_batches * args.num_train_epochs}"
+        f"Total micro-batches = {num_train_micro_batches * args.num_train_epochs}"
     )
     logger.info(f"Total optimization steps = {max_steps}")
     logger.info(f"Warmup steps = {args.warmup_steps}")
