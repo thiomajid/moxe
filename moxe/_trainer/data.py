@@ -3,6 +3,7 @@ import logging
 import os
 from typing import Literal, Optional, Union
 
+import grain.python as grain
 from datasets import Dataset as HfDataset
 from datasets import IterableDataset, load_dataset, load_from_disk
 from tqdm import tqdm
@@ -10,8 +11,6 @@ from transformers import AutoTokenizer, DataCollatorForLanguageModeling
 
 from ..config import MoxEConfig
 from .arguments import CustomArgs
-import grain.python as grain
-import jax.numpy as jnp
 
 
 def get_dataset(
@@ -130,9 +129,8 @@ def get_dataset(
 
 
 class HubDataSource(grain.RandomAccessDataSource):
-    def __init__(self, dataset:HfDataset) -> None:
+    def __init__(self, dataset: HfDataset) -> None:
         self._dataset = dataset
-
 
     def __getitem__(self, record_key):
         return self._dataset[record_key]
@@ -215,16 +213,16 @@ def create_dataloaders(
         worker_count=4,
         worker_buffer_size=2,
         operations=[
+            grain.Batch(args.per_device_train_batch_size, drop_remainder=True),
             DataCollatatorTransform(
                 target_columns=["input_ids", "labels", "attention_mask"],
                 collator=DataCollatorForLanguageModeling(
                     tokenizer=tokenizer,
                     mlm=False,
                     return_tensors="np",
-                )
+                ),
             ),
-            grain.Batch(args.per_device_train_batch_size, drop_remainder=True)
-        ]
+        ],
     )
 
     logger.info(
@@ -251,7 +249,7 @@ def create_dataloaders(
         shuffle=False,
         seed=args.seed,
         shard_options=grain.NoSharding(),
-        num_epochs=int(args.num_train_epochs)
+        num_epochs=int(args.num_train_epochs),
     )
 
     eval_loader = grain.DataLoader(
@@ -260,16 +258,16 @@ def create_dataloaders(
         worker_count=4,
         worker_buffer_size=2,
         operations=[
+            grain.Batch(args.per_device_eval_batch_size),
             DataCollatatorTransform(
                 target_columns=["input_ids", "labels", "attention_mask"],
                 collator=DataCollatorForLanguageModeling(
                     tokenizer=tokenizer,
                     mlm=False,
                     return_tensors="np",
-                )
+                ),
             ),
-            grain.Batch(args.per_device_eval_batch_size)
-        ]
+        ],
     )
 
     return train_loader, eval_loader
