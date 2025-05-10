@@ -13,9 +13,6 @@ from .arguments import CustomArgs
 import grain.python as grain
 
 
-
-
-
 def get_dataset(
     hub_url: str,
     subset: Optional[str],
@@ -148,7 +145,7 @@ class DataCollatorTransformer(grain.MapTransform):
         self.collator = collator
 
     def map(self, element):
-        return self.collator(element)
+        return self.collator([element])
 
 def create_dataloaders(
     logger: logging.Logger,
