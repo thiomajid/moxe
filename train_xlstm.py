@@ -498,7 +498,7 @@ def main(cfg: DictConfig):
                         # The manager will decide if this checkpoint is among the top 3
                         manager.save(
                             global_step,
-                            args=ocp.args.StandardSave(state),
+                            args=ocp.args.PyTreeSave(state),
                             metrics=latest_eval_metrics_for_ckpt,
                         )
                         manager.wait_until_finished()  # Ensure saving completes before proceeding
