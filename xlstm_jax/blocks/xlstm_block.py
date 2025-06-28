@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
+import jax
 import jax.numpy as jnp
 from flax import nnx
 
@@ -111,7 +112,7 @@ class xLSTMBlock(nnx.Module):
             self.ffn_norm = None
             self.ffn = None
 
-    def __call__(self, x: jnp.ndarray):
+    def __call__(self, x: jax.Array):
         """Process a full sequence through the xLSTM block.
 
         Args:

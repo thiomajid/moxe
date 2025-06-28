@@ -8,13 +8,13 @@ import jax.numpy as jnp
 
 @jax.jit
 def slstm_forward_pointwise(
-    Wx: jnp.ndarray,  # dim [B, 4*H]
-    Ry: jnp.ndarray,  # dim [B, 4*H]
-    b: jnp.ndarray,  # dim [1, 4*H]
-    states: jnp.ndarray,  # dim [4, B, H]
+    Wx: jax.Array,  # dim [B, 4*H]
+    Ry: jax.Array,  # dim [B, 4*H]
+    b: jax.Array,  # dim [1, 4*H]
+    states: jax.Array,  # dim [4, B, H]
 ) -> tuple[
-    jnp.ndarray,
-    jnp.ndarray,
+    jax.Array,
+    jax.Array,
 ]:
     """
     Implements the vanilla LSTM forward pass operation in JAX.

@@ -56,13 +56,13 @@ class MoxELayer(nnx.Module):
 
     def __call__(
         self,
-        h_t: jnp.ndarray,
+        h_t: jax.Array,
         compute_d_loss: bool = True,
         compute_group_loss: bool = True,
     ):
         h_t = self.sequence_mixer(h_t)
         B, S, D = h_t.shape
-        gate_logits: jnp.ndarray | None = None  # (B*S, E)
+        gate_logits: jax.Array | None = None  # (B*S, E)
         gate_output: ConditionedGateOutput | None = None
 
         if isinstance(self.gate, BiasConditionedGate):

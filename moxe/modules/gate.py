@@ -90,7 +90,7 @@ class BiasConditionedGate(nnx.Module):
 
     def __call__(
         self,
-        h_t: jnp.ndarray,
+        h_t: jax.Array,
         compute_d_loss: bool = True,
         compute_group_loss: bool = True,
     ):
@@ -109,7 +109,7 @@ class BiasConditionedGate(nnx.Module):
         d_t = jax.nn.sigmoid(self.entropy_predictor(h_t))
 
         # threshold_mask = None  # for observability
-        sigma: jnp.ndarray = lax.switch(
+        sigma: jax.Array = lax.switch(
             self.modulation_bias_kind,
             self._modulation_fns,
             self.gamma,

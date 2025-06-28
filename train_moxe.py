@@ -29,7 +29,7 @@ from xlstm_jax.utils import str2dtype
 
 def loss_fn(
     model: MoxEForCausalLM,
-    batch: tuple[jnp.ndarray, ...],
+    batch: tuple[jax.Array, ...],
     z_loss_coef: float,
     load_balancing_loss_coef: float,
     d_loss_coef: float = 0.0,
@@ -136,7 +136,7 @@ def loss_fn(
 def compute_grads_and_metrics(
     model: MoxEForCausalLM,
     metrics: nnx.MultiMetric,
-    batch: tuple[jnp.ndarray, ...],
+    batch: tuple[jax.Array, ...],
     z_loss_coef: float,
     load_balancing_loss_coef: float,
     d_loss_coef: float = 0.0,
@@ -167,7 +167,7 @@ def apply_gradients(
 def eval_step(
     model: xLSTMLMModel,
     metrics: nnx.MultiMetric,
-    batch: tuple[jnp.ndarray, ...],
+    batch: tuple[jax.Array, ...],
 ):
     """Perform a single evaluation step."""
     loss, logits = loss_fn(model, batch)

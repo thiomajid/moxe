@@ -69,7 +69,7 @@ class xLSTMLMModel(nnx.Module):
         else:
             self.shared_weight = None
 
-    def __call__(self, input_ids: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, input_ids: jax.Array) -> jax.Array:
         """Forward pass through the model.
 
         Args:

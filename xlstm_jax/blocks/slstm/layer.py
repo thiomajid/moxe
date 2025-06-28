@@ -96,10 +96,10 @@ class sLSTMLayer(nnx.Module):
 
     def __call__(
         self,
-        x: jnp.ndarray,
-        slstm_state: tp.Optional[jnp.ndarray] = None,
+        x: jax.Array,
+        slstm_state: tp.Optional[jax.Array] = None,
         return_last_state: bool = False,
-    ) -> tp.Union[jnp.ndarray, tuple[jnp.ndarray, dict[str, tp.Any]]]:
+    ) -> tp.Union[jax.Array, tuple[jax.Array, dict[str, tp.Any]]]:
         """Process a sequence through the sLSTM layer.
 
         Args:

@@ -6,6 +6,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from moxe.config import MoxEConfig
 from moxe.modules.model import MoxEForCausalLM
+from moxe.utils.modules import count_parameters
 
 
 @hydra.main(config_path="./configs", config_name="config", version_base="1.1")
@@ -16,6 +17,8 @@ def main(cfg: DictConfig):
     USE_JIT = True
 
     model = MoxEForCausalLM(config, rngs=rngs, dtype=jnp.float32)
+    print(count_parameters(model))
+
     jitted_model = nnx.jit(
         model,
         static_argnames=(

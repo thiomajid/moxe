@@ -23,15 +23,15 @@ slstm_pointwise_function_registry: dict[str, Callable] = {
     static_argnames=("pointwise_forward",),
 )
 def slstm_forward(
-    x: jnp.ndarray,  # [S, B, G*I]
-    states: jnp.ndarray,  # [4, B, H] only the first is used for recurrence!
-    R: jnp.ndarray,  # [K, R*H, H] - K num_heads
-    b: jnp.ndarray,  # [T*H]
+    x: jax.Array,  # [S, B, G*I]
+    states: jax.Array,  # [4, B, H] only the first is used for recurrence!
+    R: jax.Array,  # [K, R*H, H] - K num_heads
+    b: jax.Array,  # [T*H]
     pointwise_forward: Callable[
-        [jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],
-        tuple[jnp.ndarray, jnp.ndarray],
+        [jax.Array, jax.Array, jax.Array, jax.Array],
+        tuple[jax.Array, jax.Array],
     ],
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+) -> tuple[jax.Array, jax.Array, jax.Array]:
     """
     Forward pass for sLSTM over a full sequence.
 
@@ -74,7 +74,7 @@ def slstm_forward(
 
     states_all = states_all.at[:, 0].set(states)
 
-    def process_timestep(carry: tuple[jnp.ndarray, ...], time_idx):
+    def process_timestep(carry: tuple[jax.Array, ...], time_idx):
         current_states, states_all, g = carry
         current_x = x[time_idx]
 
@@ -109,12 +109,12 @@ def slstm_forward(
     static_argnames=("pointwise_forward",),
 )
 def slstm_forward_step(
-    x: jnp.ndarray,  # [B, G*I]
-    states: jnp.ndarray,  # [4, B, H] only the first is used for recurrence!
-    R: jnp.ndarray,  # [K, R*H, H] - K num_heads
-    b: jnp.ndarray,  # [T*H]
+    x: jax.Array,  # [B, G*I]
+    states: jax.Array,  # [4, B, H] only the first is used for recurrence!
+    R: jax.Array,  # [K, R*H, H] - K num_heads
+    b: jax.Array,  # [T*H]
     pointwise_forward: Callable,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+) -> tuple[jax.Array, jax.Array]:
     """
     Forward pass for a single step of the sLSTM.
 

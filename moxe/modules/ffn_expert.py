@@ -39,7 +39,7 @@ class FeedForwardExpert(nnx.Module):
 
         self.activation = jax.nn.silu
 
-    def __call__(self, x: jnp.ndarray):
+    def __call__(self, x: jax.Array):
         h_t = self.activation(self.w1(x)) * self.w3(x)
         h_t = self.w2(h_t)
         return h_t

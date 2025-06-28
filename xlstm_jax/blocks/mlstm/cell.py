@@ -78,10 +78,10 @@ class mLSTMCell(nnx.Module):
     # @nnx.jit
     def __call__(
         self,
-        q: jnp.ndarray,
-        k: jnp.ndarray,
-        v: jnp.ndarray,
-    ) -> jnp.ndarray:
+        q: jax.Array,
+        k: jax.Array,
+        v: jax.Array,
+    ) -> jax.Array:
         """Forward pass for parallel processing of the entire sequence.
 
         Args:

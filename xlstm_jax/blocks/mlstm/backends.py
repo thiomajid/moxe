@@ -15,15 +15,15 @@ from jax import lax
     static_argnames=("stabilize_rowwise", "eps"),
 )
 def parallel_stabilized_simple(
-    queries: jnp.ndarray,  # (B, NH, S, DH)
-    keys: jnp.ndarray,  # (B, NH, S, DH)
-    values: jnp.ndarray,  # (B, NH, S, DH)
-    igate_preact: jnp.ndarray,  # (B, NH, S, 1)
-    fgate_preact: jnp.ndarray,  # (B, NH, S, 1)
-    lower_triangular_matrix: tp.Optional[jnp.ndarray] = None,  # (S, S)
+    queries: jax.Array,  # (B, NH, S, DH)
+    keys: jax.Array,  # (B, NH, S, DH)
+    values: jax.Array,  # (B, NH, S, DH)
+    igate_preact: jax.Array,  # (B, NH, S, 1)
+    fgate_preact: jax.Array,  # (B, NH, S, 1)
+    lower_triangular_matrix: tp.Optional[jax.Array] = None,  # (S, S)
     stabilize_rowwise: bool = True,
     eps: float = 1e-6,
-) -> jnp.ndarray:
+) -> jax.Array:
     """This is the mLSTM cell in parallel form.
     This version is stabilized. We control the range of exp() arguments by
     ensuring that they are always smaller than 0.0 by subtracting the maximum.
@@ -120,16 +120,16 @@ def parallel_stabilized_simple(
 
 @functools.partial(jax.jit, static_argnames=("eps",))
 def recurrent_step_stabilized_simple(
-    c_state: jnp.ndarray,  # (B, NH, DH, DH)
-    n_state: jnp.ndarray,  # (B, NH, DH, 1)
-    m_state: jnp.ndarray,  # (B, NH, 1, 1)
-    q: jnp.ndarray,  # (B, NH, 1, DH)
-    k: jnp.ndarray,  # (B, NH, 1, DH)
-    v: jnp.ndarray,  # (B, NH, 1, DH)
-    igate_preact: jnp.ndarray,  # (B, NH, 1, 1)
-    fgate_preact: jnp.ndarray,  # (B, NH, 1, 1)
+    c_state: jax.Array,  # (B, NH, DH, DH)
+    n_state: jax.Array,  # (B, NH, DH, 1)
+    m_state: jax.Array,  # (B, NH, 1, 1)
+    q: jax.Array,  # (B, NH, 1, DH)
+    k: jax.Array,  # (B, NH, 1, DH)
+    v: jax.Array,  # (B, NH, 1, DH)
+    igate_preact: jax.Array,  # (B, NH, 1, 1)
+    fgate_preact: jax.Array,  # (B, NH, 1, 1)
     eps: float = 1e-6,
-) -> tuple[jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array]]:
     """This is a single step of the mLSTM operation in recurrent form.
 
     Args:
@@ -195,20 +195,18 @@ def recurrent_step_stabilized_simple(
     static_argnames=("chunk_size", "return_last_state", "eps"),
 )
 def chunkwise_simple(
-    queries: jnp.ndarray,  # (B, NH, S, DH)
-    keys: jnp.ndarray,  # (B, NH, S, DH)
-    values: jnp.ndarray,  # (B, NH, S, DH)
-    igate_preact: jnp.ndarray,  # (B, NH, S)
-    fgate_preact: jnp.ndarray,  # (B, NH, S)
-    initial_C: tp.Optional[jnp.ndarray] = None,  # (B, NH, DH, DH)
-    initial_n: tp.Optional[jnp.ndarray] = None,  # (B, NH, DH)
-    initial_m: tp.Optional[jnp.ndarray] = None,  # (B, NH, 1)
+    queries: jax.Array,  # (B, NH, S, DH)
+    keys: jax.Array,  # (B, NH, S, DH)
+    values: jax.Array,  # (B, NH, S, DH)
+    igate_preact: jax.Array,  # (B, NH, S)
+    fgate_preact: jax.Array,  # (B, NH, S)
+    initial_C: tp.Optional[jax.Array] = None,  # (B, NH, DH, DH)
+    initial_n: tp.Optional[jax.Array] = None,  # (B, NH, DH)
+    initial_m: tp.Optional[jax.Array] = None,  # (B, NH, 1)
     chunk_size: int = 64,
     return_last_state: bool = False,
     eps: float = 1e-6,
-) -> tp.Union[
-    jnp.ndarray, tuple[jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]
-]:
+) -> tp.Union[jax.Array, tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array]]]:
     """Chunkwise mLSTM processing for efficient computation.
 
     Args:

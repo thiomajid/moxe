@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 GenerationCarry = tuple[
-    jnp.ndarray,  # The full sequence array
+    jax.Array,  # The full sequence array
     int,  # The current index in the sequence
     jax.random.PRNGKey,  # The current PRNG key
 ]

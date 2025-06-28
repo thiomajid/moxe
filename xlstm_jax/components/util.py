@@ -3,7 +3,7 @@
 # Converted to JAX/Flax by Abdoul Majid O. Thiombiano
 from typing import Callable
 
-import jax.numpy as jnp
+import jax
 from flax import nnx
 
 
@@ -41,8 +41,8 @@ class ParameterProxy:
         self,
         module: nnx.Module,
         parameter_name: str,
-        internal_to_external: Callable[[jnp.ndarray], jnp.ndarray],
-        external_to_internal: Callable[[jnp.ndarray], jnp.ndarray],
+        internal_to_external: Callable[[jax.Array], jax.Array],
+        external_to_internal: Callable[[jax.Array], jax.Array],
     ):
         self.module = module
         self.parameter_name = parameter_name
@@ -100,5 +100,5 @@ class Identity(nnx.Module):
     def __init__(self):
         pass
 
-    def __call__(self, x: jnp.ndarray):
+    def __call__(self, x: jax.Array):
         return x

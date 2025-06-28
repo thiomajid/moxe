@@ -44,7 +44,7 @@ class MoxEModel(nnx.Module):
 
     def __call__(
         self,
-        input_ids: jnp.ndarray,
+        input_ids: jax.Array,
         return_layers_outputs: bool = False,
         compute_d_loss: bool = True,
         compute_group_loss: bool = True,
@@ -114,7 +114,7 @@ class MoxEForCausalLM(nnx.Module):
 
     def __call__(
         self,
-        input_ids: jnp.ndarray,
+        input_ids: jax.Array,
         output_hidden_states: bool = False,
         return_layers_outputs: bool = False,
         compute_d_loss: bool = True,

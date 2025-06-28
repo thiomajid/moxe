@@ -151,7 +151,7 @@ class xLSTMBlockStack(nnx.Module):
         return blocks
 
     # @nnx.jit
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, x: jax.Array) -> jax.Array:
         """Process input through all blocks in sequence (forward pass).
 
         Args:

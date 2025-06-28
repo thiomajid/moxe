@@ -221,7 +221,7 @@ class sLSTMCellBase(nnx.Module):
     def head_dim(self):
         return self.config.hidden_size // self.config.num_heads
 
-    def _permute_input(self, x: jnp.ndarray) -> jnp.ndarray:
+    def _permute_input(self, x: jax.Array) -> jax.Array:
         """Transform input to the internal format expected by slstm implementation."""
         if self.config.input_shape == "SBGNH":
             y = x.reshape(
@@ -251,7 +251,7 @@ class sLSTMCellBase(nnx.Module):
         else:
             raise ValueError("Bad internal_input_shape value")
 
-    def _permute_output(self, x: jnp.ndarray) -> jnp.ndarray:
+    def _permute_output(self, x: jax.Array) -> jax.Array:
         """Transform output from internal format to the desired output format."""
         if self.config.output_shape == "SBH":
             return x
@@ -269,7 +269,7 @@ class sLSTMCellBase(nnx.Module):
         else:
             raise ValueError(f"Unsupported output_shape: {self.config.output_shape}")
 
-    def _check_input(self, input: jnp.ndarray) -> None:
+    def _check_input(self, input: jax.Array) -> None:
         expected_size = self.config.hidden_size * self.config.num_gates
         chex.assert_equal(input.shape[-1], expected_size)
         # if input.shape[-1] != expected_size:
@@ -277,7 +277,7 @@ class sLSTMCellBase(nnx.Module):
         #         f"Input size mismatch: Expected input size {expected_size}, but got {input.shape[-1]}."
         #     )
 
-    def _zero_state(self, input: jnp.ndarray) -> jnp.ndarray:
+    def _zero_state(self, input: jax.Array) -> jax.Array:
         """Returns a zeros state matching dtype and batch size of `input`."""
         batch_dim = input.shape[1]
         return jnp.zeros(
@@ -287,9 +287,9 @@ class sLSTMCellBase(nnx.Module):
 
     def _get_state(
         self,
-        input: jnp.ndarray,
-        state: Optional[jnp.ndarray] = None,
-    ) -> jnp.ndarray:
+        input: jax.Array,
+        state: Optional[jax.Array] = None,
+    ) -> jax.Array:
         if state is None:
             state = self._zero_state(input)
         else:
@@ -306,7 +306,7 @@ class sLSTMCellBase(nnx.Module):
             #     )
         return state
 
-    def _get_final_state(self, all_states: jnp.ndarray) -> jnp.ndarray:
+    def _get_final_state(self, all_states: jax.Array) -> jax.Array:
         """
         All states has the structure
         [STATES, SEQUENCE, BATCH, HIDDEN]
@@ -315,9 +315,9 @@ class sLSTMCellBase(nnx.Module):
 
     def __call__(
         self,
-        input: jnp.ndarray,
-        state: Optional[jnp.ndarray] = None,
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        input: jax.Array,
+        state: Optional[jax.Array] = None,
+    ) -> Tuple[jax.Array, jax.Array]:
         """Process a sequence through the sLSTM cell."""
         self._check_input(input)
         input = self._permute_input(input)
@@ -410,7 +410,7 @@ class sLSTMCell_vanilla(sLSTMCellBase):
         self.pointwise = slstm_pointwise_function_registry[self.config.function]
         self.config.internal_input_shape = "SBGNH"
 
-    def _recurrent_kernel_ext2int(self, recurrent_kernel_ext: jnp.ndarray):
+    def _recurrent_kernel_ext2int(self, recurrent_kernel_ext: jax.Array):
         """Convert external kernel format to internal format."""
 
         return (
@@ -428,7 +428,7 @@ class sLSTMCell_vanilla(sLSTMCellBase):
             )
         )
 
-    def _recurrent_kernel_int2ext(self, recurrent_kernel_int: jnp.ndarray):
+    def _recurrent_kernel_int2ext(self, recurrent_kernel_int: jax.Array):
         """Convert internal kernel format to external format."""
         return jnp.transpose(
             recurrent_kernel_int.reshape(
@@ -440,7 +440,7 @@ class sLSTMCell_vanilla(sLSTMCellBase):
             (0, 3, 1, 2),
         )
 
-    def _bias_ext2int(self, bias_ext: jnp.ndarray) -> jnp.ndarray:
+    def _bias_ext2int(self, bias_ext: jax.Array) -> jax.Array:
         """Convert external bias format to internal format."""
         return jnp.reshape(
             jnp.transpose(
@@ -452,7 +452,7 @@ class sLSTMCell_vanilla(sLSTMCellBase):
             shape=-1,
         )
 
-    def _bias_int2ext(self, bias_int: jnp.ndarray) -> jnp.ndarray:
+    def _bias_int2ext(self, bias_int: jax.Array) -> jax.Array:
         """Convert internal bias format to external format."""
         return jnp.transpose(
             bias_int.reshape(
@@ -461,7 +461,7 @@ class sLSTMCell_vanilla(sLSTMCellBase):
             (1, 0, 2),
         )
 
-    def _impl(self, input: jnp.ndarray, state: jnp.ndarray) -> jnp.ndarray:
+    def _impl(self, input: jax.Array, state: jax.Array) -> jax.Array:
         """Implementation of forward pass for full sequence."""
         # Convert internal parameters to formats expected by slstm_forward
         rk_internal = self._recurrent_kernel_ext2int(self._recurrent_kernel_)
@@ -475,7 +475,7 @@ class sLSTMCell_vanilla(sLSTMCellBase):
             self.pointwise,
         )[0]
 
-    def _impl_step(self, input: jnp.ndarray, state: jnp.ndarray) -> jnp.ndarray:
+    def _impl_step(self, input: jax.Array, state: jax.Array) -> jax.Array:
         """Implementation of forward pass for single step."""
         # Convert internal parameters to formats expected by slstm_forward_step
         rk_internal = self._recurrent_kernel_ext2int(self._recurrent_kernel_)
