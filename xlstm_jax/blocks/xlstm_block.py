@@ -64,6 +64,7 @@ class xLSTMBlock(nnx.Module):
         self,
         config: xLSTMBlockConfig,
         *,
+        mesh: jax.sharding.Mesh,
         rngs: nnx.Rngs,
         dtype=jnp.float32,
     ) -> None:
@@ -72,39 +73,47 @@ class xLSTMBlock(nnx.Module):
         Args:
             config: Configuration for the xLSTM block
         """
-        self.config = config
-        self.dtype = dtype
 
         embedding_dim = (
-            self.config.mlstm.embedding_dim
-            if self.config.mlstm is not None
-            else self.config.slstm.embedding_dim
+            config.mlstm.embedding_dim
+            if config.mlstm is not None
+            else config.slstm.embedding_dim
         )
 
-        self.xlstm_norm = LayerNorm(
+        self.xlstm_norm: nnx.LayerNorm = LayerNorm(
             num_features=embedding_dim,
+            use_scale=True,
             use_bias=False,
             rngs=rngs,
             dtype=dtype,
+            mesh=mesh,
         )
 
-        if self.config.mlstm is not None:
-            self.xlstm = mLSTMLayer(config=self.config.mlstm, rngs=rngs, dtype=dtype)
-        elif self.config.slstm is not None:
-            self.xlstm = sLSTMLayer(config=self.config.slstm, rngs=rngs, dtype=dtype)
+        if config.mlstm is not None:
+            self.xlstm = mLSTMLayer(
+                config=config.mlstm, mesh=mesh, rngs=rngs, dtype=dtype
+            )
+
+        elif config.slstm is not None:
+            self.xlstm = sLSTMLayer(
+                config=config.slstm, mesh=mesh, rngs=rngs, dtype=dtype
+            )
         else:
             raise ValueError("Either mlstm or slstm must be provided")
 
-        if self.config.feedforward is not None:
+        if config.feedforward is not None:
             self.ffn_norm = LayerNorm(
-                num_features=self.config.feedforward.embedding_dim,
+                num_features=config.feedforward.embedding_dim,
+                use_scale=True,
                 use_bias=False,
                 rngs=rngs,
                 dtype=dtype,
+                mesh=mesh,
             )
 
             self.ffn = create_feedforward(
-                config=self.config.feedforward,
+                config=config.feedforward,
+                mesh=mesh,
                 rngs=rngs,
                 dtype=dtype,
             )
@@ -121,7 +130,9 @@ class xLSTMBlock(nnx.Module):
         Returns:
             Output tensor of shape (B, S, D)
         """
-        x = x + self.xlstm(self.xlstm_norm(x))
+        x_normed = self.xlstm_norm(x)
+        x_xlstm = self.xlstm(x_normed)
+        x = x + x_xlstm
 
         # can't use lax.cond here because when evaluated, on a branch, the
         # ffn is None, so it will not be called
@@ -129,11 +140,3 @@ class xLSTMBlock(nnx.Module):
             x = x + self.ffn(self.ffn_norm(x))
 
         return x
-
-    def reset_parameters(self, rngs: nnx.Rngs) -> None:
-        """Reset parameters of the xLSTM block."""
-        self.xlstm_norm.reset_parameters(rngs)
-        self.xlstm.reset_parameters(rngs)
-        if self.ffn is not None:
-            self.ffn.reset_parameters(rngs)
-            self.ffn_norm.reset_parameters(rngs)

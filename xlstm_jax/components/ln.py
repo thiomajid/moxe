@@ -2,7 +2,6 @@
 # Maximilian Beck, Korbinian Pöppel
 # Converted to JAX/Flax by Abdoul Majid O. Thiombiano
 
-import functools
 
 import jax.numpy as jnp
 from flax import nnx
@@ -10,6 +9,7 @@ from jax.sharding import Mesh
 
 
 def LayerNorm(
+    num_features: int,
     mesh: Mesh,
     rngs: nnx.Rngs,
     use_scale: bool = True,
@@ -17,8 +17,8 @@ def LayerNorm(
     epsilon: float = 1e-5,
     dtype=jnp.float32,
 ):
-    return functools.partial(
-        nnx.LayerNorm,
+    return nnx.LayerNorm(
+        num_features=num_features,
         use_scale=use_scale,
         use_bias=use_bias,
         rngs=rngs,
@@ -39,6 +39,7 @@ def LayerNorm(
 
 
 def MultiHeadLayerNorm(
+    num_features: int,
     mesh: Mesh,
     rngs: nnx.Rngs,
     axis: int = 1,
@@ -49,6 +50,7 @@ def MultiHeadLayerNorm(
 ):
     return nnx.vmap(
         LayerNorm(
+            num_features=num_features,
             mesh=mesh,
             rngs=rngs,
             use_scale=use_scale,

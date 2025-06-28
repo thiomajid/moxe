@@ -42,104 +42,104 @@ class mLSTMLayerConfig(UpProjConfigMixin):
 class mLSTMLayer(nnx.Module):
     config_class = mLSTMLayerConfig
 
-    def __init__(self, config: mLSTMLayerConfig, *, rngs: nnx.Rngs, dtype=jnp.float32):
-        self.config = config
-        self.dtype = dtype
-
+    def __init__(
+        self,
+        config: mLSTMLayerConfig,
+        *,
+        mesh: jax.sharding.Mesh,
+        rngs: nnx.Rngs,
+        dtype=jnp.float32,
+    ):
         # Up-projection
         self.proj_up = nnx.Linear(
-            in_features=self.config.embedding_dim,
-            out_features=2 * self.config._inner_embedding_dim,
-            use_bias=self.config.bias,
-            kernel_init=lambda key, shape, param_dtype: small_init_initializer(
-                dim=self.config.embedding_dim
-            )(key, shape, param_dtype),
-            bias_init=jax.nn.initializers.zeros,
-            param_dtype=dtype,
-            dtype=dtype,
+            in_features=config.embedding_dim,
+            out_features=2 * config._inner_embedding_dim,
+            use_bias=config.bias,
             rngs=rngs,
+            dtype=dtype,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(
+                small_init_initializer(dim=config.embedding_dim),
+                sharding=(None, "model"),
+                mesh=mesh,
+            ),
+            bias_init=nnx.with_partitioning(
+                nnx.initializers.zeros_init(),
+                sharding=("model",),
+                mesh=mesh,
+            ),
         )
 
         # QKV projections
-        num_proj_heads = round(
-            self.config._inner_embedding_dim // self.config.qkv_proj_blocksize
+        num_proj_heads = round(config._inner_embedding_dim // config.qkv_proj_blocksize)
+        qkv_config = LinearHeadwiseExpandConfig(
+            in_features=config._inner_embedding_dim,
+            num_heads=num_proj_heads,
+            bias=config.bias,
         )
 
         self.q_proj = LinearHeadwiseExpand(
-            config=LinearHeadwiseExpandConfig(
-                in_features=self.config._inner_embedding_dim,
-                num_heads=num_proj_heads,
-                bias=self.config.bias,
-            ),
+            config=qkv_config,
             rngs=rngs,
-            dtype=self.dtype,
+            dtype=dtype,
         )
 
         self.k_proj = LinearHeadwiseExpand(
-            config=LinearHeadwiseExpandConfig(
-                in_features=self.config._inner_embedding_dim,
-                num_heads=num_proj_heads,
-                bias=self.config.bias,
-            ),
+            config=qkv_config,
             rngs=rngs,
-            dtype=self.dtype,
+            dtype=dtype,
         )
 
         self.v_proj = LinearHeadwiseExpand(
-            config=LinearHeadwiseExpandConfig(
-                in_features=self.config._inner_embedding_dim,
-                num_heads=num_proj_heads,
-                bias=self.config.bias,
-            ),
+            config=qkv_config,
             rngs=rngs,
-            dtype=self.dtype,
+            dtype=dtype,
         )
 
         # Convolutional layer
         self.conv1d = CausalConv1d(
             config=CausalConv1dConfig(
-                feature_dim=self.config._inner_embedding_dim,
-                kernel_size=self.config.conv1d_kernel_size,
+                feature_dim=config._inner_embedding_dim,
+                kernel_size=config.conv1d_kernel_size,
             ),
             rngs=rngs,
-            dtype=self.dtype,
+            dtype=dtype,
         )
 
         # mLSTM cell
         self.mlstm_cell = mLSTMCell(
             config=mLSTMCellConfig(
-                context_length=self.config.context_length,
-                embedding_dim=self.config._inner_embedding_dim,
-                num_heads=self.config.num_heads,
+                context_length=config.context_length,
+                embedding_dim=config._inner_embedding_dim,
+                num_heads=config.num_heads,
             ),
             rngs=rngs,
-            dtype=self.dtype,
+            dtype=dtype,
         )
 
         self.ogate_act_fn = jax.nn.swish
 
         # Learnable skip connection parameter
         self.learnable_skip = nnx.Param(
-            jnp.ones(self.config._inner_embedding_dim, dtype=self.dtype)
+            jnp.ones(config._inner_embedding_dim, dtype=dtype)
         )
 
         # Down-projection
         self.proj_down = nnx.Linear(
-            in_features=self.config._inner_embedding_dim,
-            out_features=self.config.embedding_dim,
-            use_bias=self.config.bias,
+            in_features=config._inner_embedding_dim,
+            out_features=config.embedding_dim,
+            use_bias=config.bias,
             kernel_init=lambda key, shape, p_dtype: wang_initializer(
-                dim=self.config.embedding_dim, num_blocks=self.config._num_blocks
+                dim=config.embedding_dim, num_blocks=config._num_blocks
             )(key, shape, dtype=p_dtype),
             bias_init=jax.nn.initializers.zeros,
             rngs=rngs,
-            param_dtype=self.dtype,
-            dtype=self.dtype,
+            param_dtype=dtype,
+            dtype=dtype,
         )
 
-        self.dropout = nnx.Dropout(rate=self.config.dropout, rngs=rngs)
+        self.dropout = nnx.Dropout(rate=config.dropout, rngs=rngs)
 
-    # @nnx.jit
     def __call__(self, x: jax.Array):
         """Forward pass for processing a full sequence.
 
@@ -154,7 +154,7 @@ class mLSTMLayer(nnx.Module):
         # Up-projection
         x_inner = self.proj_up(x)
         x_mlstm, z = jnp.split(
-            x_inner, indices_or_sections=[self.config._inner_embedding_dim], axis=-1
+            x_inner, indices_or_sections=[config._inner_embedding_dim], axis=-1
         )
 
         # mLSTM branch
@@ -175,54 +175,3 @@ class mLSTMLayer(nnx.Module):
         # Down-projection with dropout
         y = self.dropout(self.proj_down(h_state))
         return y
-
-    def reset_parameters(self, rngs: nnx.Rngs):
-        """Reset parameters of the layer."""
-        # init inproj
-        small_init_fn = small_init_initializer(dim=self.config.embedding_dim)
-        self.proj_up.kernel = nnx.Param(
-            small_init_fn(rngs.params(), self.proj_up.kernel.shape, self.dtype)
-        )
-
-        if self.proj_up.bias is not None:
-            self.proj_up.bias = nnx.Param(
-                nnx.initializers.zeros(
-                    rngs.params(), self.proj_up.bias.shape, self.dtype
-                )
-            )
-
-        wang_init_fn = wang_initializer(
-            dim=self.config.embedding_dim, num_blocks=self.config._num_blocks
-        )
-        self.proj_down.kernel = nnx.Param(
-            wang_init_fn(rngs.params(), self.proj_down.kernel.shape, self.dtype)
-        )
-
-        if self.proj_up.bias is not None:
-            self.proj_down.bias = nnx.Param(
-                nnx.initializers.zeros(
-                    rngs.params(), self.proj_down.bias.shape, self.dtype
-                )
-            )
-
-        self.learnable_skip = nnx.Param(
-            nnx.initializers.ones(rngs.params(), self.learnable_skip.shape, self.dtype)
-        )
-
-        def _init_qkv_proj(qkv_proj: LinearHeadwiseExpand):
-            qkv_proj.kernel = nnx.Param(
-                small_init_fn(rngs.params(), qkv_proj.kernel.shape, self.dtype)
-            )
-
-            if qkv_proj.bias is not None:
-                qkv_proj.bias = nnx.Param(
-                    nnx.initializers.zeros(
-                        rngs.params(), qkv_proj.bias.shape, self.dtype
-                    )
-                )
-
-        _init_qkv_proj(self.q_proj)
-        _init_qkv_proj(self.k_proj)
-        _init_qkv_proj(self.v_proj)
-
-        self.mlstm_cell.reset_parameters(rngs)

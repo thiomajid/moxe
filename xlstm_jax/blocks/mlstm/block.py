@@ -4,6 +4,7 @@
 from dataclasses import dataclass, field
 from typing import Optional
 
+import jax
 import jax.numpy as jnp
 from flax import nnx
 
@@ -38,6 +39,7 @@ class mLSTMBlock(xLSTMBlock):
         self,
         config: mLSTMBlockConfig,
         *,
+        mesh: jax.sharding.Mesh,
         rngs: nnx.Rngs,
         dtype=jnp.float32,
     ) -> None:
@@ -56,4 +58,4 @@ class mLSTMBlock(xLSTMBlock):
         )
 
         # Initialize using the parent class constructor
-        super().__init__(config=xlstm_config, rngs=rngs, dtype=dtype)
+        super().__init__(config=xlstm_config, mesh=mesh, rngs=rngs, dtype=dtype)
