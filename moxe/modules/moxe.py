@@ -2,7 +2,6 @@ from copy import deepcopy
 
 import jax
 import jax.numpy as jnp
-from einops import rearrange
 from flax import nnx
 from jax import lax
 
@@ -34,9 +33,7 @@ class MoxELayer(nnx.Module):
         self.sequence_mixer = xLSTMBlockStack(mixer_config, rngs=rngs, dtype=dtype)
 
         self.gate = self.__create_router(config, rngs, dtype=dtype)
-        self.experts: list[nnx.Module] = get_expert_modules(
-            config, rngs=rngs, dtype=dtype
-        )
+        self.experts = get_expert_modules(config, rngs=rngs, dtype=dtype)
 
     def __create_router(self, config: MoxEConfig, rngs: nnx.Rngs, dtype=jnp.float32):
         match config.router_type:
@@ -86,44 +83,40 @@ class MoxELayer(nnx.Module):
         top_k_weights = top_k_weights / top_k_weights.sum(axis=-1, keepdims=True)
         top_k_weights = jnp.astype(top_k_weights, h_t.dtype)
 
-        # create dense weight matrix for combining expert outputs
-        # we need a matrix of shape (B*S, E) where only the
-        # selected experts have non-zero weights
-        # initialize with zeros.
-        dense_weights = jnp.zeros_like(gate_logits, dtype=h_t.dtype)
+        flat_h_t = h_t.reshape(B * S, D)
 
-        # scatter the top_k_weights into the dense_weights matrix according to top_k_indices.
-        batch_indices = jnp.arange(B * S)[:, None]  # Shape (B*S, 1) - broadcastable
+        # Compute outputs only for top-k experts per token
+        def apply_expert_to_token(
+            token_indices: jax.Array,
+            token_weights: jax.Array,
+            token_input: jax.Array,
+        ):
+            """Apply top-k experts to a single token"""
 
-        # dense_weights[batch_indices, top_k_indices] = top_k_weights
-        dense_weights = dense_weights.at[batch_indices, top_k_indices].set(
-            top_k_weights
-        )
+            def apply_single_expert(expert_idx: jax.Array, weight: jax.Array):
+                # Reshape token_input to (1, 1, D) for xLSTM which expects (B, S, D)
+                reshaped_input = token_input.reshape(1, 1, -1)
+                expert_output = lax.switch(
+                    expert_idx,
+                    self.experts,
+                    operand=reshaped_input,
+                )
+                # Extract the token output: (1, 1, D) -> (D,)
+                expert_output = expert_output[0, 0]
+                return expert_output * weight
 
-        # Compute all experts output
-        # all_expert_outputs shape: (E, B, S, D)
-        all_expert_outputs = jnp.stack(
-            jax.tree.map(
-                f=lambda expert: expert(h_t),
-                tree=self.experts,
+            # Map over the k selected experts for this token
+            weighted_outputs = jax.vmap(apply_single_expert)(
+                token_indices, token_weights
             )
-        )
+            return jnp.sum(weighted_outputs, axis=0)
 
-        # Transpose (E, B, S, D) to (B*S, E, D) for easier weighting
-        all_expert_outputs = rearrange(all_expert_outputs, "e b s d -> (b s) e d")
+        # Apply to all tokens
+        expert_outputs = jax.vmap(apply_expert_to_token)(
+            top_k_indices, top_k_weights, flat_h_t
+        )  # Shape: (B*S, D)
 
-        # all_expert_outputs = jnp.transpose(all_expert_outputs, (1, 0, 2))
-
-        # Combine expert outputs using the dense weights
-        # Multiply the outputs by their corresponding weights.
-        # dense_weights shape: (B*S, E)
-        # all_expert_outputs shape: (B*S, E, D)
-        # Need to reshape weights for broadcasting: (B*S, E, 1)
-        weighted_outputs = all_expert_outputs * dense_weights[..., None]
-
-        # Sum the weighted outputs across the expert dimension
-        # final_output shape: (B*S, D)
-        final_hidden_states = jnp.sum(weighted_outputs, axis=1).reshape(B, S, D)
+        final_hidden_states = expert_outputs.reshape(B, S, D)
 
         # --- Rest of the function remains the same ---
         z_loss = lax.cond(
