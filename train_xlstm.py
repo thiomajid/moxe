@@ -167,7 +167,7 @@ def main(cfg: DictConfig):
     dtype = str2dtype(dtype_str)
 
     mesh_shape = tuple(args.mesh_shape) if hasattr(args, "mesh_shape") else (1,)
-    axis_names = tuple(args.axis_names) if hasattr(args, "axis_names") else ("data",)
+    axis_names = tuple(args.axis_names) if hasattr(args, "axis_names") else ("dp",)
     mesh = create_mesh(mesh_shape=mesh_shape, axis_names=axis_names)
 
     model: tp.Optional[xLSTMLMModel] = None
@@ -237,9 +237,9 @@ def main(cfg: DictConfig):
     ]
 
     train_loader, eval_loader = create_dataloaders(
-        logger,
-        args,
-        tokenizer,
+        logger=logger,
+        args=args,
+        tokenizer=tokenizer,
         max_seq_length=config.context_length,
         train_data_ops=train_data_ops,
         eval_data_ops=eval_data_ops,
@@ -358,7 +358,7 @@ def main(cfg: DictConfig):
     # Training Loop
     DATA_SHARDING = NamedSharding(
         create_mesh(mesh_shape, axis_names),
-        spec=PartitionSpec("data", None),
+        spec=PartitionSpec("dp", None),
     )
 
     for epoch in range(args.num_train_epochs):
