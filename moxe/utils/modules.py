@@ -150,14 +150,14 @@ def checkpoint_post_eval(
     logger.info(f"Epoch {epoch + 1} Evaluation Results: {eval_log_data}")
 
     # Update metrics for checkpointing and save checkpoint
-    key_metric = "recon_loss"
+    key_metric = "loss"
     if key_metric in computed_eval_metrics:
         latest_eval_metrics_for_ckpt = {
             best_metric_key: float(computed_eval_metrics[key_metric])
         }
 
         logger.info(
-            f"Saving checkpoint at end of epoch {epoch + 1} (step {global_step}) with eval_recon_loss={latest_eval_metrics_for_ckpt[best_metric_key]:.6f}..."
+            f"Saving checkpoint at end of epoch {epoch + 1} (step {global_step}) with eval_loss={latest_eval_metrics_for_ckpt[best_metric_key]:.6f}..."
         )
 
         state = nnx.state(model)
