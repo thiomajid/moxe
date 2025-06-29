@@ -56,7 +56,14 @@ def _group_wise_loss_computation(
 
 
 class BiasConditionedGate(nnx.Module):
-    def __init__(self, config: MoxEConfig, *, rngs: nnx.Rngs, dtype=jnp.float32):
+    def __init__(
+        self,
+        config: MoxEConfig,
+        *,
+        mesh: jax.sharding.Mesh,
+        rngs: nnx.Rngs,
+        dtype=jnp.float32,
+    ):
         self.gamma = config.gamma
         self.num_experts = config.num_experts
         self.experts_per_group = self.num_experts // 2
@@ -69,6 +76,16 @@ class BiasConditionedGate(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             rngs=rngs,
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.lecun_normal(),
+                sharding=("tp", None),
+                mesh=mesh,
+            ),
+            bias_init=nnx.with_partitioning(
+                nnx.initializers.zeros_init(),
+                sharding=("tp",),
+                mesh=mesh,
+            ),
         )
 
         self.router = nnx.Linear(
@@ -78,6 +95,16 @@ class BiasConditionedGate(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             rngs=rngs,
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.lecun_normal(),
+                sharding=("tp", None),
+                mesh=mesh,
+            ),
+            bias_init=nnx.with_partitioning(
+                nnx.initializers.zeros_init(),
+                sharding=("tp",),
+                mesh=mesh,
+            ),
         )
 
         self.modulation_bias_kind = str2modulation_bias(config.modulation_bias)

@@ -1,8 +1,10 @@
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from jax.sharding import Mesh
 
 from xlstm_jax.components.ln import LayerNorm
+from xlstm_jax.mask import apply_padding_mask_with_gradient_stop, create_padding_mask
 
 from ..config import MoxEConfig
 from ..output import MoxECausalLMOutput, MoxELayerOutput, MoxEModelOutput
@@ -10,13 +12,27 @@ from ..utils.types import get_moe_layer
 
 
 class MoxEModel(nnx.Module):
-    def __init__(self, config: MoxEConfig, *, rngs: nnx.Rngs, dtype=jnp.float32):
+    def __init__(
+        self,
+        config: MoxEConfig,
+        *,
+        mesh: Mesh,
+        rngs: nnx.Rngs,
+        dtype=jnp.float32,
+    ):
+        self.pad_token_idx = config.xlstm.pad_token_idx
+
         self.token_embedding = nnx.Embed(
             num_embeddings=config.xlstm.vocab_size,
             features=config.xlstm.embedding_dim,
             dtype=dtype,
             param_dtype=dtype,
             rngs=rngs,
+            embedding_init=nnx.with_partitioning(
+                nnx.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0),
+                sharding=(None, "tp"),
+                mesh=mesh,
+            ),
         )
 
         self.embedding_dropout = (
@@ -30,17 +46,9 @@ class MoxEModel(nnx.Module):
 
         layer_type = get_moe_layer(config.moe_layer_type)
         self.layers = [
-            layer_type(config, rngs=rngs, dtype=dtype) for _ in range(config.num_layers)
+            layer_type(config, mesh=mesh, rngs=rngs, dtype=dtype)
+            for _ in range(config.num_layers)
         ]
-
-        # self._layer_branches = [
-        #     lambda state, compute_d_loss, compute_group_loss: layer(
-        #         state,
-        #         compute_d_loss=compute_d_loss,
-        #         compute_group_loss=compute_group_loss,
-        #     )
-        #     for layer in self.layers
-        # ]
 
     def __call__(
         self,
@@ -48,9 +56,17 @@ class MoxEModel(nnx.Module):
         return_layers_outputs: bool = False,
         compute_d_loss: bool = True,
         compute_group_loss: bool = True,
+        training: bool = False,
     ):
         h_t = self.token_embedding(input_ids)
-        h_t = self.embedding_dropout(h_t)
+        padding_mask = create_padding_mask(input_ids, self.pad_token_idx)
+        h_t = apply_padding_mask_with_gradient_stop(h_t, padding_mask)
+
+        h_t = jax.lax.cond(
+            isinstance(self.embedding_dropout, nnx.Dropout),
+            lambda: self.embedding_dropout(h_t, deterministic=not training),
+            lambda: self.embedding_dropout(h_t),
+        )
 
         # @nnx.scan(
         #     length=len(self.layers),
@@ -92,10 +108,23 @@ class MoxEModel(nnx.Module):
 
 
 class MoxEForCausalLM(nnx.Module):
-    def __init__(self, config: MoxEConfig, *, rngs: nnx.Rngs, dtype=jnp.float32):
-        self.moe = MoxEModel(config, rngs=rngs, dtype=dtype)
+    def __init__(
+        self,
+        config: MoxEConfig,
+        *,
+        mesh: Mesh,
+        rngs: nnx.Rngs,
+        dtype=jnp.float32,
+    ):
+        self.moe = MoxEModel(config, mesh=mesh, rngs=rngs, dtype=dtype)
         self.norm = (
-            LayerNorm(config.xlstm.embedding_dim, rngs=rngs, dtype=dtype)
+            LayerNorm(
+                config.xlstm.embedding_dim,
+                use_bias=False,
+                mesh=mesh,
+                rngs=rngs,
+                dtype=dtype,
+            )
             if config.post_layers_norm
             else jax.nn.identity
         )
@@ -107,6 +136,11 @@ class MoxEForCausalLM(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             rngs=rngs,
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.lecun_normal(),
+                sharding=(None, "tp"),
+                mesh=mesh,
+            ),
         )
 
         if config.xlstm.tie_weights:
@@ -119,12 +153,14 @@ class MoxEForCausalLM(nnx.Module):
         return_layers_outputs: bool = False,
         compute_d_loss: bool = True,
         compute_group_loss: bool = True,
+        training: bool = False,
     ):
         moe_out = self.moe(
             input_ids,
             return_layers_outputs=return_layers_outputs,
             compute_d_loss=compute_d_loss,
             compute_group_loss=compute_group_loss,
+            training=training,
         )
 
         h_t = moe_out.hidden_states

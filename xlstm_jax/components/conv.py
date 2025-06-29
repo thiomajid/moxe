@@ -69,12 +69,12 @@ class CausalConv1d(nnx.Module):
                 param_dtype=dtype,
                 kernel_init=nnx.with_partitioning(
                     initializer=jax.nn.initializers.lecun_normal(),
-                    sharding=(None, None, "model"),
+                    sharding=(None, None, "tp"),
                     mesh=mesh,
                 ),
                 bias_init=nnx.with_partitioning(
                     initializer=nnx.initializers.zeros_init(),
-                    sharding=("model",),
+                    sharding=("tp",),
                     mesh=mesh,
                 ),
             )

@@ -73,12 +73,12 @@ class GatedFeedForward(nnx.Module):
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 small_init_initializer(dim=config.embedding_dim),
-                sharding=(None, "model"),
+                sharding=(None, "tp"),
                 mesh=mesh,
             ),
             bias_init=nnx.with_partitioning(
                 nnx.initializers.zeros_init(),
-                sharding=("model",),
+                sharding=("tp",),
                 mesh=mesh,
             ),
         )
@@ -94,12 +94,12 @@ class GatedFeedForward(nnx.Module):
                 wang_initializer(
                     dim=config.embedding_dim, num_blocks=config._num_blocks
                 ),
-                sharding=(None, "model"),
+                sharding=(None, "tp"),
                 mesh=mesh,
             ),
             bias_init=nnx.with_partitioning(
                 nnx.initializers.zeros_init(),
-                sharding=("model",),
+                sharding=("tp",),
                 mesh=mesh,
             ),
         )

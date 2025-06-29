@@ -8,7 +8,7 @@ from moxe.utils.parser import parse_xlstm_config_dict
 from xlstm_jax.xlstm_lm_model import xLSTMLMModelConfig
 
 
-@dataclass
+@dataclass(unsafe_hash=True, order=True)
 class MoxEConfig:
     # model_type = "MoxE"
 

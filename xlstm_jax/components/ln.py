@@ -27,12 +27,12 @@ def LayerNorm(
         epsilon=epsilon,
         scale_init=nnx.with_partitioning(
             nnx.initializers.ones_init(),
-            sharding=("model",),
+            sharding=("tp",),
             mesh=mesh,
         ),
         bias_init=nnx.with_partitioning(
             nnx.initializers.zeros_init(),
-            sharding=("model",),
+            sharding=("tp",),
             mesh=mesh,
         ),
     )

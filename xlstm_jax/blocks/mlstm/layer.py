@@ -60,12 +60,12 @@ class mLSTMLayer(nnx.Module):
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 small_init_initializer(dim=config.embedding_dim),
-                sharding=(None, "model"),
+                sharding=(None, "tp"),
                 mesh=mesh,
             ),
             bias_init=nnx.with_partitioning(
                 nnx.initializers.zeros_init(),
-                sharding=("model",),
+                sharding=("tp",),
                 mesh=mesh,
             ),
         )
@@ -129,7 +129,7 @@ class mLSTMLayer(nnx.Module):
             jnp.empty(config._inner_embedding_dim, dtype=dtype),
             init_fn=nnx.with_partitioning(
                 nnx.initializers.ones_init(),
-                sharding=("model",),
+                sharding=("tp",),
                 mesh=mesh,
             ),
         )
@@ -146,11 +146,11 @@ class mLSTMLayer(nnx.Module):
                 wang_initializer(
                     dim=config.embedding_dim, num_blocks=config._num_blocks
                 ),
-                sharding=(None, "model"),
+                sharding=("tp", None),
             ),
             bias_init=nnx.with_partitioning(
                 nnx.initializers.zeros_init(),
-                sharding=("model",),
+                sharding=("tp",),
                 mesh=mesh,
             ),
         )

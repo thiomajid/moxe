@@ -71,7 +71,7 @@ class LinearHeadwiseExpand(nnx.Module):
                 # init_fn=jax.nn.initializers.normal(stddev=stddev),
                 init_fn=nnx.with_partitioning(
                     small_init_initializer(in_features_per_head),
-                    sharding=(None, None, "model"),
+                    sharding=(None, None, "tp"),
                     mesh=mesh,
                 ),
             )
@@ -84,7 +84,7 @@ class LinearHeadwiseExpand(nnx.Module):
                 ),
                 init_fn=nnx.with_partitioning(
                     small_init_initializer(in_features_per_head),
-                    sharding=(None, None, "model"),
+                    sharding=(None, None, "tp"),
                     mesh=mesh,
                 ),
             )
@@ -96,7 +96,7 @@ class LinearHeadwiseExpand(nnx.Module):
                     jnp.zeros(config._out_features, dtype=dtype),
                     init_fn=nnx.with_partitioning(
                         nnx.initializers.zeros_init(),
-                        sharding=("model",),
+                        sharding=("tp",),
                         mesh=mesh,
                     ),
                 )
@@ -105,7 +105,7 @@ class LinearHeadwiseExpand(nnx.Module):
                     jnp.zeros(config._out_features, dtype=dtype),
                     init_fn=nnx.with_partitioning(
                         nnx.initializers.zeros_init(),
-                        sharding=("model",),
+                        sharding=("tp",),
                         mesh=mesh,
                     ),
                 )

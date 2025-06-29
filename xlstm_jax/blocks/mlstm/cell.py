@@ -49,12 +49,12 @@ class mLSTMCell(nnx.Module):
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.zeros_init(),
-                sharding=(None, "model"),
+                sharding=(None, "tp"),
                 mesh=mesh,
             ),
             bias_init=nnx.with_partitioning(
                 nnx.initializers.normal(stddev=0.1, dtype=dtype),
-                sharding=("model",),
+                sharding=("tp",),
                 mesh=mesh,
             ),
         )
@@ -67,12 +67,12 @@ class mLSTMCell(nnx.Module):
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.zeros_init(),
-                sharding=(None, "model"),
+                sharding=(None, "tp"),
                 mesh=mesh,
             ),
             bias_init=nnx.with_partitioning(
                 bias_linspace_initializer(start=3.0, end=6.0),
-                sharding=("model",),
+                sharding=("tp",),
                 mesh=mesh,
             ),
         )

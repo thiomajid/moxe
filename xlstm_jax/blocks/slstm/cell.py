@@ -143,11 +143,11 @@ class sLSTMCellBase(nnx.Module):
         self._recurrent_kernel_ = nnx.Param(
             jnp.zeros(
                 (config.num_heads, head_dim, config.num_gates, head_dim),
-                dtype=DTYPE_DICT[config.dtype_r],
+                dtype=dtype,
             ),
             init_fn=nnx.with_partitioning(
                 self._initialize_recurrent_kernel,
-                sharding=(None, None, None, "model"),
+                sharding=(None, None, None, "tp"),
                 mesh=mesh,
             ),
         )
@@ -156,11 +156,11 @@ class sLSTMCellBase(nnx.Module):
         self._bias_ = nnx.Param(
             jnp.zeros(
                 (config.num_heads, config.num_gates, head_dim),
-                dtype=DTYPE_DICT[config.dtype_b],
+                dtype=dtype,
             ),
             init_fn=nnx.with_partitioning(
                 self._initialize_bias,
-                sharding=(None, None, "model"),
+                sharding=(None, None, "tp"),
                 mesh=mesh,
             ),
         )

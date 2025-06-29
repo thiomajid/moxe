@@ -54,7 +54,7 @@ class xLSTMLMModel(nnx.Module):
             param_dtype=dtype,
             embedding_init=nnx.with_partitioning(
                 nnx.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0),
-                sharding=(None, "model"),
+                sharding=(None, "tp"),
                 mesh=mesh,
             ),
         )
@@ -74,7 +74,7 @@ class xLSTMLMModel(nnx.Module):
             dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.lecun_normal(),
-                sharding=(None, "model"),
+                sharding=(None, "tp"),
                 mesh=mesh,
             ),
         )
@@ -86,7 +86,7 @@ class xLSTMLMModel(nnx.Module):
                 jnp.zeros((config.vocab_size, config.embedding_dim), dtype=dtype),
                 init_fn=nnx.with_partitioning(
                     small_init_initializer(dim=config.embedding_dim),
-                    sharding=(None, "model"),
+                    sharding=(None, "tp"),
                     mesh=mesh,
                 ),
             )
@@ -96,7 +96,7 @@ class xLSTMLMModel(nnx.Module):
         self.tie_weights = config.tie_weights
         self.pad_token_idx = config.pad_token_idx
 
-    def __call__(self, input_ids: jax.Array) -> jax.Array:
+    def __call__(self, input_ids: jax.Array, training: bool = False) -> jax.Array:
         """Forward pass through the model.
 
         Args:
@@ -117,7 +117,11 @@ class xLSTMLMModel(nnx.Module):
         padding_mask = create_padding_mask(input_ids, self.pad_token_idx)
         embeddings = apply_padding_mask_with_gradient_stop(embeddings, padding_mask)
 
-        hidden_states = self.embedding_dropout(embeddings)
+        hidden_states = jax.lax.cond(
+            isinstance(self.embedding_dropout, nnx.Dropout),
+            lambda: self.embedding_dropout(embeddings, deterministic=not training),
+            lambda: self.embedding_dropout(embeddings),
+        )
         hidden_states = self.xlstm_block_stack(hidden_states)
 
         # Apply language model head
