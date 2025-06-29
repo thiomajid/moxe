@@ -3,16 +3,21 @@
 # Converted to JAX/Flax by Abdoul Majid O. Thiombiano
 
 
+from functools import partial
+
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 
-@jax.jit
+@partial(jax.jit, static_argnames=("mesh",))
 def slstm_forward_pointwise(
     Wx: jax.Array,  # dim [B, 4*H]
     Ry: jax.Array,  # dim [B, 4*H]
     b: jax.Array,  # dim [1, 4*H]
     states: jax.Array,  # dim [4, B, H]
+    mesh: Mesh,
 ) -> tuple[
     jax.Array,
     jax.Array,
@@ -44,10 +49,25 @@ def slstm_forward_pointwise(
 
     # Split the raw activations into the 4 gates
     raw_reshaped = raw.reshape(raw.shape[0], 4, -1)
-    iraw = raw_reshaped[:, 0]  # input gate
-    fraw = raw_reshaped[:, 1]  # forget gate
-    zraw = raw_reshaped[:, 2]  # cell update
-    oraw = raw_reshaped[:, 3]  # output gate
+    raw_reshaped = jax.lax.with_sharding_constraint(
+        raw_reshaped,
+        NamedSharding(mesh, P("dp", None, "tp")),
+    )
+
+    with mesh:
+        iraw = jax.lax.with_sharding_constraint(
+            raw_reshaped[:, 0], P("dp", "tp")
+        )  # input gate
+
+        fraw = jax.lax.with_sharding_constraint(
+            raw_reshaped[:, 1], P("dp", "tp")
+        )  # forget gate
+        zraw = jax.lax.with_sharding_constraint(
+            raw_reshaped[:, 2], P("dp", "tp")
+        )  # cell update
+        oraw = jax.lax.with_sharding_constraint(
+            raw_reshaped[:, 3], P("dp", "tp")
+        )  # output gate
 
     # Compute logfplusm
     logfplusm = m + jax.nn.log_sigmoid(fraw)

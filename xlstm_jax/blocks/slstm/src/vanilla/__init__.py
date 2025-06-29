@@ -20,7 +20,7 @@ slstm_pointwise_function_registry: dict[str, Callable] = {
 
 @functools.partial(
     jax.jit,
-    static_argnames=("pointwise_forward",),
+    static_argnames=("pointwise_forward", "mesh"),
 )
 def slstm_forward(
     x: jax.Array,  # [S, B, G*I]
@@ -31,6 +31,7 @@ def slstm_forward(
         [jax.Array, jax.Array, jax.Array, jax.Array],
         tuple[jax.Array, jax.Array],
     ],
+    mesh: jax.sharding.Mesh,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """
     Forward pass for sLSTM over a full sequence.
@@ -87,7 +88,13 @@ def slstm_forward(
 
         Ry = jnp.transpose(Ry, (0, 2, 1, 3)).reshape(batch_dim, -1)
 
-        new_states, gates = pointwise_forward(current_x, Ry, b, current_states)
+        new_states, gates = pointwise_forward(
+            current_x,
+            Ry,
+            b,
+            current_states,
+            mesh=mesh,
+        )
 
         new_states = new_states.astype(current_states.dtype)
         gates = gates.astype(current_states.dtype)

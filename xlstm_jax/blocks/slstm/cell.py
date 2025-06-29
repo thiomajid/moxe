@@ -9,9 +9,12 @@ import chex
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 
 from .src.vanilla import (
     slstm_forward,
+    slstm_forward_step,
     slstm_pointwise_function_registry,
 )
 
@@ -121,11 +124,18 @@ class sLSTMCellBase(nnx.Module):
         self,
         config: sLSTMCellConfig,
         *,
-        mesh: jax.sharding.Mesh,
+        mesh: Mesh,
         rngs: nnx.Rngs,
         dtype=jnp.float32,
     ):
+        # Check configuration validity
+        if config.hidden_size % config.num_heads != 0:
+            raise ValueError(
+                f"Hidden Size {config.hidden_size} must be divisible by head num {config.num_heads}"
+            )
+
         head_dim = config.hidden_size // config.num_heads
+        self.mesh = mesh
 
         self.num_heads = config.num_heads
         self.hidden_size = config.hidden_size
@@ -164,12 +174,6 @@ class sLSTMCellBase(nnx.Module):
                 mesh=mesh,
             ),
         )
-
-        # Check configuration validity
-        if config.hidden_size % config.num_heads != 0:
-            raise ValueError(
-                f"Hidden Size {config.hidden_size} must be divisible by head num {config.num_heads}"
-            )
 
     def _initialize_recurrent_kernel(self, key, shape):
         result = jnp.zeros(shape)
@@ -337,7 +341,7 @@ class sLSTMCell_vanilla(sLSTMCellBase):
     def __init__(
         self,
         config: sLSTMCellConfig,
-        mesh: jax.sharding.Mesh,
+        mesh: Mesh,
         rngs: nnx.Rngs,
         dtype=jnp.float32,
     ):
@@ -400,12 +404,17 @@ class sLSTMCell_vanilla(sLSTMCellBase):
         rk_internal = self._recurrent_kernel_ext2int(self._recurrent_kernel_)
         bias_internal = self._bias_ext2int(self._bias_)
 
+        with self.mesh:
+            input = jax.lax.with_sharding_constraint(input, P(None, "dp", None))
+            state = jax.lax.with_sharding_constraint(state, P(None, "dp", "tp"))
+
         return slstm_forward(
             input,
             state,
             rk_internal,
             bias_internal,
             self.pointwise,
+            mesh=self.mesh,
         )[0]
 
     def _impl_step(self, input: jax.Array, state: jax.Array) -> jax.Array:
@@ -415,7 +424,7 @@ class sLSTMCell_vanilla(sLSTMCellBase):
         bias_internal = self._bias_ext2int(self._bias_)
 
         # Call vanilla implementation (no CUDA)
-        return slstm_forward(
+        return slstm_forward_step(
             input,
             state,
             rk_internal,
@@ -432,7 +441,7 @@ class sLSTMCell(nnx.Module):
     def __new__(
         cls,
         config: sLSTMCellConfig,
-        mesh: jax.sharding.Mesh,
+        mesh: Mesh,
         rngs: nnx.Rngs,
         dtype=jnp.float32,
     ):
