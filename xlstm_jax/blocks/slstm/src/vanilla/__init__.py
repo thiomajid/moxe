@@ -42,7 +42,6 @@ def slstm_forward(
         R: Recurrent kernel of shape [K, R*H, H] (K: num_heads, R: num_gates, H: head_dim)
         b: Recurrent bias of shape [T*H]
         pointwise_forward: Function implementing the pointwise operations
-        constants: Additional constants for the pointwise function
 
     Returns:
         tuple of:
@@ -134,7 +133,6 @@ def slstm_forward_step(
         R: Recurrent weights tensor of shape [K, R*H, H] where K is num_heads
         b: Bias tensor of shape [T*H]
         pointwise_forward: Function implementing the pointwise operations
-        constants: Additional constants for the pointwise function
 
     Returns:
         tuple of:

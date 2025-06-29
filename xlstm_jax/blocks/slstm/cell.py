@@ -2,8 +2,8 @@
 # Korbinian Poeppel
 # Converted to JAX/Flax by Abdoul Majid O. Thiombiano
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Dict, Literal, Optional, Sequence, Tuple, Union
+from dataclasses import dataclass
+from typing import Literal, Optional, Sequence, Tuple, Union
 
 import chex
 import jax
@@ -54,7 +54,6 @@ class sLSTMCellConfig:
     internal_input_shape: Literal["SBNGH", "SBGNH", "SBNHG"] = "SBNGH"
     output_shape: Literal["BNSH", "SBH", "BSH", "SBNH"] = "BNSH"
 
-    constants: Dict[str, Any] = field(default_factory=dict)
     dtype: DTYPES = "bfloat16"
     dtype_b: Optional[DTYPES] = "float32"  # biases
     dtype_r: Optional[DTYPES] = None  # recurrent matrix
