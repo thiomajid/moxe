@@ -64,7 +64,7 @@ class MoxEModel(nnx.Module):
 
         h_t = jax.lax.cond(
             isinstance(self.embedding_dropout, nnx.Dropout),
-            lambda: self.embedding_dropout(h_t, deterministic=not training),
+            lambda: self.embedding_dropout(h_t),
             lambda: self.embedding_dropout(h_t),
         )
 

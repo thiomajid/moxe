@@ -126,7 +126,6 @@ class sLSTMCellBase(nnx.Module):
     ):
         head_dim = config.hidden_size // config.num_heads
 
-        self.head_dim = head_dim
         self.num_heads = config.num_heads
         self.hidden_size = config.hidden_size
         self.num_gates = config.num_gates

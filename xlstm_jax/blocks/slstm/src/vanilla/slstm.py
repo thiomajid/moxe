@@ -37,7 +37,7 @@ def slstm_forward_pointwise(
 
     # Extract states from the states tensor
     states_reshaped = states.reshape(4, states.shape[1], -1)
-    y = states_reshaped[0]  # hidden state
+    # y = states_reshaped[0]  # hidden state
     c = states_reshaped[1]  # cell state
     n = states_reshaped[2]  # normalization state
     m = states_reshaped[3]  # memory state
