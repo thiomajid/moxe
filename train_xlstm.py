@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import random
 import shutil
 import time
 import typing as tp
@@ -27,6 +28,7 @@ from transformers import (
     HfArgumentParser,
 )
 
+from moxe.inference import GenerationCarry, generate_sequence_scan
 from moxe.tensorboard import TensorBoardLogger
 from moxe.training.arguments import CustomArgs
 from moxe.training.data import DataCollatatorTransform, create_dataloaders
@@ -360,6 +362,11 @@ def main(cfg: DictConfig):
         spec=PartitionSpec("dp", None),
     )
 
+    GENERATION_SAMPLES = ["Once upon a time", "There was a girl", "Next to the tree"]
+    MAX_NEW_TOKENS = 100
+    GREEDY = False
+    TEMPERATURE = 0.85
+
     for epoch in range(args.num_train_epochs):
         epoch_start_time = time.perf_counter()
         logger.info(f"Starting Epoch {epoch + 1}/{args.num_train_epochs}")
@@ -491,6 +498,38 @@ def main(cfg: DictConfig):
                 epoch=epoch,
             )
 
+            # Generate some text
+            choosen_prompt = random.choice(GENERATION_SAMPLES)
+            input_ids = tokenizer(choosen_prompt, return_tensors="jax", padding=True)[
+                "input_ids"
+            ]
+
+            batch_size = input_ids.shape[0]
+            initial_len = input_ids.shape[1]
+            total_length = initial_len + MAX_NEW_TOKENS
+            full_x_init = jnp.zeros((batch_size, total_length), dtype=jnp.int32)
+            full_x_init = full_x_init.at[:, :initial_len].set(input_ids)
+            full_x_init = jax.device_put(full_x_init, DATA_SHARDING)
+            key = jax.random.key(123 + epoch)
+            initial_carry: GenerationCarry = (
+                full_x_init,
+                initial_len,
+                key,
+            )
+
+            sequences = generate_sequence_scan(
+                model,
+                initial_carry,
+                max_new_tokens=MAX_NEW_TOKENS,
+                vocab_size=config.vocab_size,
+                temperature=TEMPERATURE,
+                greedy=GREEDY,
+            )
+
+            sequences = tokenizer.batch_decode(sequences)
+            for seq in sequences:
+                tb_logger.writer.text("train/generation", seq, step=global_step)
+
         else:
             logger.warning(
                 f"No evaluation data processed for epoch {epoch + 1}. Eval loader might be empty or misconfigured."
@@ -586,7 +625,7 @@ def main(cfg: DictConfig):
 
     # Save model config
     with open(artifacts_dir / "config.json", "w") as f:
-        json.dump(config.to_dict(), f, indent=4)
+        json.dump(asdict(config), f, indent=4)
     logger.info(f"Model config saved to {artifacts_dir / 'config.json'}")
 
     # Save trainer config
