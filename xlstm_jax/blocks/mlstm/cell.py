@@ -84,12 +84,19 @@ class mLSTMCell(nnx.Module):
             use_bias=False,
             rngs=rngs,
             dtype=dtype,
-            mesh=mesh,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(
+                nnx.initializers.ones_init(),
+                sharding=("tp",),
+                mesh=mesh,
+            ),
+            bias_init=nnx.with_partitioning(
+                nnx.initializers.zeros_init(),
+                sharding=("tp",),
+                mesh=mesh,
+            ),
         )
 
-        # Create causal mask buffer
-        # INFO: if the mask is not an instance of nnx.Param, the jit compilation
-        # fails when nnx will try to flatten the mLSTMCell's pytree
         self.causal_mask = nnx.Variable(
             jnp.tril(
                 jnp.ones((config.context_length, config.context_length), dtype=jnp.bool)
@@ -115,14 +122,14 @@ class mLSTMCell(nnx.Module):
         B, S, _ = q.shape  # (B, S, H)
 
         # Combine inputs for gate computation
-        qkv = jnp.concatenate([q, k, v], axis=-1)
+        if_gate_input = jnp.concatenate([q, k, v], axis=-1)
 
         # Compute input and forget gate pre-activations
-        igate_preact = self.igate(qkv)  # (B, S, NH)
+        igate_preact = self.igate(if_gate_input)  # (B, S, NH)
         igate_preact = jnp.transpose(igate_preact, (0, 2, 1))
         igate_preact = igate_preact[..., None]  # (B, NH, S, 1)
 
-        fgate_preact = self.fgate(qkv)  # (B, S, NH)
+        fgate_preact = self.fgate(if_gate_input)  # (B, S, NH)
         fgate_preact = jnp.transpose(fgate_preact, (0, 2, 1))
         fgate_preact = fgate_preact[..., None]  # (B, NH, S, 1)
 

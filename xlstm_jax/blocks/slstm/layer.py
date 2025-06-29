@@ -100,7 +100,17 @@ class sLSTMLayer(nnx.Module):
             use_scale=config.group_norm_weight,
             rngs=rngs,
             dtype=dtype,
-            mesh=mesh,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(
+                nnx.initializers.ones_init(),
+                sharding=("tp",),
+                mesh=mesh,
+            ),
+            bias_init=nnx.with_partitioning(
+                nnx.initializers.zeros_init(),
+                sharding=("tp",),
+                mesh=mesh,
+            ),
         )
 
         self.dropout = nnx.Dropout(rate=config.dropout, rngs=rngs)

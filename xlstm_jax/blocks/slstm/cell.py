@@ -61,6 +61,7 @@ class sLSTMCellConfig:
     dtype_a: Optional[DTYPES] = None  # internal accumulation
 
     initial_val: Union[float, Sequence[float]] = 0.0
+    enable_automatic_mixed_precision: bool = True
 
     @property
     def head_dim(self):

@@ -46,7 +46,7 @@ def parallel_stabilized_simple(
     B, NH, S, DH = queries.shape
     _dtype = queries.dtype
 
-    chex.assert_equal_shape(queries, keys, values)
+    chex.assert_trees_all_equal_shapes(queries, keys, values)
     chex.assert_shape(igate_preact, (B, NH, S, 1))
     chex.assert_shape(fgate_preact, (B, NH, S, 1))
 

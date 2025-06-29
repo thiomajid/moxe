@@ -96,7 +96,7 @@ class xLSTMLMModel(nnx.Module):
         self.tie_weights = config.tie_weights
         self.pad_token_idx = config.pad_token_idx
 
-    def __call__(self, input_ids: jax.Array, training: bool = False) -> jax.Array:
+    def __call__(self, input_ids: jax.Array, training: bool = False):
         """Forward pass through the model.
 
         Args:
@@ -117,18 +117,15 @@ class xLSTMLMModel(nnx.Module):
         padding_mask = create_padding_mask(input_ids, self.pad_token_idx)
         embeddings = apply_padding_mask_with_gradient_stop(embeddings, padding_mask)
 
-        hidden_states = jax.lax.cond(
-            isinstance(self.embedding_dropout, nnx.Dropout),
-            lambda: self.embedding_dropout(embeddings, deterministic=not training),
-            lambda: self.embedding_dropout(embeddings),
-        )
+        hidden_states = self.embedding_dropout(embeddings)
+
         hidden_states = self.xlstm_block_stack(hidden_states)
 
         # Apply language model head
-        logits: jax.Array = jax.lax.cond(
-            self.tie_weights,
-            lambda: jnp.matmul(hidden_states, self.shared_weight.T),
-            lambda: self.lm_head(hidden_states),
-        )
+        logits = None
+        if self.tie_weights:
+            logits = jnp.matmul(hidden_states, self.shared_weight.T)
+        else:
+            logits = self.lm_head(hidden_states)
 
         return logits

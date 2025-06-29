@@ -94,11 +94,7 @@ class MoxEModel(nnx.Module):
             () if return_layers_outputs else None
         )
         for layer in self.layers:
-            layer_out = layer(
-                h_t,
-                compute_d_loss=compute_d_loss,
-                compute_group_loss=compute_group_loss,
-            )
+            layer_out = layer(h_t)
             h_t = layer_out.hidden_states
 
             if return_layers_outputs:

@@ -65,13 +65,10 @@ def slstm_forward(
     g = jnp.zeros(
         shape=(sequence_dim + 1, num_gates_t, batch_dim, hidden_dim),
         dtype=x.dtype,
-        device=x.device,
     )
 
     states_all = jnp.zeros(
-        (num_states, sequence_dim + 1, batch_dim, hidden_dim),
-        dtype=x.dtype,
-        device=x.device,
+        (num_states, sequence_dim + 1, batch_dim, hidden_dim), dtype=x.dtype
     )
 
     states_all = states_all.at[:, 0].set(states)

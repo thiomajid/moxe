@@ -78,7 +78,7 @@ class BiasConditionedGate(nnx.Module):
             rngs=rngs,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.lecun_normal(),
-                sharding=("tp", None),
+                sharding=(None, None),
                 mesh=mesh,
             ),
             bias_init=nnx.with_partitioning(
@@ -97,7 +97,7 @@ class BiasConditionedGate(nnx.Module):
             rngs=rngs,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.lecun_normal(),
-                sharding=("tp", None),
+                sharding=(None, "tp"),
                 mesh=mesh,
             ),
             bias_init=nnx.with_partitioning(

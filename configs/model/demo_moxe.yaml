@@ -1,7 +1,7 @@
 num_experts: 8
 top_k_experts: 2
 num_layers: 8
-moe_layer_type: "moxe"
+moe_layer_type: "mlstm"
 router_type: "conditioned_addition"
 expert_type: "xlstm"
 modulation_bias: "proportional"
@@ -13,21 +13,23 @@ ffn_dim: 1024
 group_wise_loss: "kl_div"
 
 xlstm:
-  vocab_size: 49_152
-  context_length: 128
-  num_blocks: 1
+  pad_token_idx: 1
+  vocab_size: 48
+  context_length: 10
+  num_blocks: 2
   embedding_dim: 32
+  slstm_at: [1]
 
   mlstm_block:
     mlstm:
       conv1d_kernel_size: 4
       qkv_proj_blocksize: 32
-      num_heads: 8
+      num_heads: 2
 
   slstm_block:
     slstm:
       backend: "vanilla"
-      num_heads: 8
+      num_heads: 2
       conv1d_kernel_size: 4
       bias_init: "powerlaw_blockdependent"
 

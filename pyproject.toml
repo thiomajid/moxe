@@ -23,3 +23,8 @@ dependencies = [
 
 [tool.setuptools]
 packages = ["moxe"]
+
+[dependency-groups]
+dev = [
+    "xlstm>=2.0.4",
+]

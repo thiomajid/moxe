@@ -60,59 +60,36 @@ class LinearHeadwiseExpand(nnx.Module):
         in_features_per_head = in_features // num_heads
         out_features_per_head = config._out_features // num_heads
 
+        self.trainable_kernel = config.trainable_weight
+        self.trainable_bias = config.trainable_bias
+        self.num_heads = num_heads
+
         # Create weight parameter
-        # stddev = math.sqrt(2 / 5 / in_features_per_head)
-        if config.trainable_weight:
-            self.kernel = nnx.Param(
-                jnp.empty(
-                    (num_heads, out_features_per_head, in_features_per_head),
-                    dtype=dtype,
-                ),
-                # init_fn=jax.nn.initializers.normal(stddev=stddev),
-                init_fn=nnx.with_partitioning(
-                    small_init_initializer(in_features_per_head),
-                    sharding=(None, None, "tp"),
-                    mesh=mesh,
-                ),
-            )
-        else:
-            # For non-trainable weights, use nnx.State instead of nnx.Param
-            self.kernel = nnx.State(
-                jnp.empty(
-                    (num_heads, out_features_per_head, in_features_per_head),
-                    dtype=dtype,
-                ),
-                init_fn=nnx.with_partitioning(
-                    small_init_initializer(in_features_per_head),
-                    sharding=(None, None, "tp"),
-                    mesh=mesh,
-                ),
-            )
+        self.kernel = nnx.Param(
+            jnp.empty(
+                (num_heads, out_features_per_head, in_features_per_head),
+                dtype=dtype,
+            ),
+            # init_fn=jax.nn.initializers.normal(stddev=stddev),
+            init_fn=nnx.with_partitioning(
+                small_init_initializer(in_features_per_head),
+                sharding=(None, None, "tp"),
+                mesh=mesh,
+            ),
+        )
 
         # Create bias parameter
         if config.bias:
-            if config.trainable_bias:
-                self.bias = nnx.Param(
-                    jnp.zeros(config._out_features, dtype=dtype),
-                    init_fn=nnx.with_partitioning(
-                        nnx.initializers.zeros_init(),
-                        sharding=("tp",),
-                        mesh=mesh,
-                    ),
-                )
-            else:
-                self.bias = nnx.State(
-                    jnp.zeros(config._out_features, dtype=dtype),
-                    init_fn=nnx.with_partitioning(
-                        nnx.initializers.zeros_init(),
-                        sharding=("tp",),
-                        mesh=mesh,
-                    ),
-                )
+            self.bias = nnx.Param(
+                jnp.zeros(config._out_features, dtype=dtype),
+                init_fn=nnx.with_partitioning(
+                    nnx.initializers.zeros_init(),
+                    sharding=("tp",),
+                    mesh=mesh,
+                ),
+            )
         else:
             self.bias = None
-
-        self.num_heads = num_heads
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Forward pass for the headwise linear transformation.
@@ -123,20 +100,24 @@ class LinearHeadwiseExpand(nnx.Module):
         Returns:
             Output tensor of shape (..., out_features)
         """
-        # Get shape information
         shape = x.shape
         x = x.reshape(*shape[:-1], self.num_heads, -1)
-        x = jnp.einsum("...hd,hod->...ho", x, self.kernel)
-        x = x.reshape(*shape[:-2], -1)
+        kernel = jax.lax.cond(
+            self.trainable_kernel,
+            lambda: self.kernel.value,
+            lambda: jax.lax.stop_gradient(self.kernel.value),
+        )
+
+        x = jnp.einsum("...hd,hod->...ho", x, kernel)
+        x = x.reshape(*shape[:-1], -1)
 
         if self.bias is not None:
-            x = x + self.bias
+            bias = jax.lax.cond(
+                self.trainable_bias,
+                lambda: self.bias.value,
+                lambda: jax.lax.stop_gradient(self.bias.value),
+            )
 
-        # x = jax.lax.cond(
-        #     self.bias is not None,
-        #     lambda _x: _x + self.bias,
-        #     lambda _x: _x,
-        #     operand=x,
-        # )
+            x = x + bias
 
         return x

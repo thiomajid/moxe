@@ -166,7 +166,6 @@ class mLSTMLayer(nnx.Module):
         Returns:
             Output tensor of shape (B, S, H)
         """
-        # B, S, _ = x.shape
 
         # Up-projection
         x_inner = self.proj_up(x)
@@ -179,8 +178,8 @@ class mLSTMLayer(nnx.Module):
         q = self.q_proj(x_mlstm_conv_act)
         k = self.k_proj(x_mlstm_conv_act)
         v = self.v_proj(x_mlstm)
-
         h_tilde_state = self.mlstm_cell(q=q, k=k, v=v)
+
         h_tilde_state_skip = h_tilde_state + (self.learnable_skip * x_mlstm_conv_act)
 
         # Output / z branch
