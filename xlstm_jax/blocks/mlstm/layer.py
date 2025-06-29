@@ -80,48 +80,58 @@ class mLSTMLayer(nnx.Module):
 
         self.q_proj = LinearHeadwiseExpand(
             config=qkv_config,
+            mesh=mesh,
             rngs=rngs,
             dtype=dtype,
         )
 
         self.k_proj = LinearHeadwiseExpand(
             config=qkv_config,
+            mesh=mesh,
             rngs=rngs,
             dtype=dtype,
         )
 
         self.v_proj = LinearHeadwiseExpand(
             config=qkv_config,
+            mesh=mesh,
             rngs=rngs,
             dtype=dtype,
         )
 
         # Convolutional layer
         self.conv1d = CausalConv1d(
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
             config=CausalConv1dConfig(
                 feature_dim=config._inner_embedding_dim,
                 kernel_size=config.conv1d_kernel_size,
             ),
-            rngs=rngs,
-            dtype=dtype,
         )
 
         # mLSTM cell
         self.mlstm_cell = mLSTMCell(
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
             config=mLSTMCellConfig(
                 context_length=config.context_length,
                 embedding_dim=config._inner_embedding_dim,
                 num_heads=config.num_heads,
             ),
-            rngs=rngs,
-            dtype=dtype,
         )
 
         self.ogate_act_fn = jax.nn.swish
 
         # Learnable skip connection parameter
         self.learnable_skip = nnx.Param(
-            jnp.ones(config._inner_embedding_dim, dtype=dtype)
+            jnp.empty(config._inner_embedding_dim, dtype=dtype),
+            init_fn=nnx.with_partitioning(
+                nnx.initializers.ones_init(),
+                sharding=("model",),
+                mesh=mesh,
+            ),
         )
 
         # Down-projection
@@ -129,18 +139,25 @@ class mLSTMLayer(nnx.Module):
             in_features=config._inner_embedding_dim,
             out_features=config.embedding_dim,
             use_bias=config.bias,
-            kernel_init=lambda key, shape, p_dtype: wang_initializer(
-                dim=config.embedding_dim, num_blocks=config._num_blocks
-            )(key, shape, dtype=p_dtype),
-            bias_init=jax.nn.initializers.zeros,
             rngs=rngs,
-            param_dtype=dtype,
             dtype=dtype,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(
+                wang_initializer(
+                    dim=config.embedding_dim, num_blocks=config._num_blocks
+                ),
+                sharding=(None, "model"),
+            ),
+            bias_init=nnx.with_partitioning(
+                nnx.initializers.zeros_init(),
+                sharding=("model",),
+                mesh=mesh,
+            ),
         )
 
         self.dropout = nnx.Dropout(rate=config.dropout, rngs=rngs)
 
-    def __call__(self, x: jax.Array):
+    def __call__(self, x: jax.Array, training: bool = False):
         """Forward pass for processing a full sequence.
 
         Args:
@@ -153,9 +170,7 @@ class mLSTMLayer(nnx.Module):
 
         # Up-projection
         x_inner = self.proj_up(x)
-        x_mlstm, z = jnp.split(
-            x_inner, indices_or_sections=[config._inner_embedding_dim], axis=-1
-        )
+        x_mlstm, z = jnp.split(x_inner, indices_or_sections=2, axis=-1)
 
         # mLSTM branch
         x_mlstm_conv = self.conv1d(x_mlstm)
@@ -166,12 +181,11 @@ class mLSTMLayer(nnx.Module):
         v = self.v_proj(x_mlstm)
 
         h_tilde_state = self.mlstm_cell(q=q, k=k, v=v)
-
         h_tilde_state_skip = h_tilde_state + (self.learnable_skip * x_mlstm_conv_act)
 
         # Output / z branch
         h_state = h_tilde_state_skip * self.ogate_act_fn(z)
 
         # Down-projection with dropout
-        y = self.dropout(self.proj_down(h_state))
+        y = self.dropout(self.proj_down(h_state), deterministic=not training)
         return y

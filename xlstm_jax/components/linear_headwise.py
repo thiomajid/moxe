@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from flax.typing import Initializer
 
 from xlstm_jax.components.init import small_init_initializer
 
@@ -51,8 +50,6 @@ class LinearHeadwiseExpand(nnx.Module):
     def __init__(
         self,
         config: LinearHeadwiseExpandConfig,
-        kernel_init: Initializer,
-        bias_init: Initializer,
         *,
         mesh: jax.sharding.Mesh,
         rngs: nnx.Rngs,
@@ -73,7 +70,7 @@ class LinearHeadwiseExpand(nnx.Module):
                 ),
                 # init_fn=jax.nn.initializers.normal(stddev=stddev),
                 init_fn=nnx.with_partitioning(
-                    kernel_init,
+                    small_init_initializer(in_features_per_head),
                     sharding=(None, None, "model"),
                     mesh=mesh,
                 ),

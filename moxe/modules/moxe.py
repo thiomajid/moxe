@@ -85,38 +85,44 @@ class MoxELayer(nnx.Module):
 
         flat_h_t = h_t.reshape(B * S, D)
 
-        # Compute outputs only for top-k experts per token
-        def apply_expert_to_token(
-            token_indices: jax.Array,
-            token_weights: jax.Array,
-            token_input: jax.Array,
-        ):
-            """Apply top-k experts to a single token"""
+        # Expert-level parallelism: each expert processes all its assigned tokens
+        def compute_expert_outputs(expert_idx: int, inputs: jax.Array):
+            """Compute outputs for a single expert across all tokens"""
+            # Create mask for tokens assigned to this expert
+            # top_k_indices: (B*S, top_k), expert_idx: scalar
+            expert_mask = top_k_indices == expert_idx  # (B*S, top_k)
 
-            def apply_single_expert(expert_idx: jax.Array, weight: jax.Array):
-                # Reshape token_input to (1, 1, D) for xLSTM which expects (B, S, D)
-                reshaped_input = token_input.reshape(1, 1, -1)
-                expert_output = lax.switch(
-                    expert_idx,
-                    self.experts,
-                    operand=reshaped_input,
-                )
-                # Extract the token output: (1, 1, D) -> (D,)
-                expert_output = expert_output[0, 0]
-                return expert_output * weight
+            # Get weights for this expert across all tokens
+            expert_weights = jnp.where(expert_mask, top_k_weights, 0.0)  # (B*S, top_k)
+            expert_weights = jnp.sum(expert_weights, axis=-1)  # (B*S,)
 
-            # Map over the k selected experts for this token
-            weighted_outputs = jax.vmap(apply_single_expert)(
-                token_indices, token_weights
+            # Create token selection mask (any token that routes to this expert)
+            token_mask = jnp.any(expert_mask, axis=-1)  # (B*S,)
+
+            # Apply expert to ALL tokens (will be masked out later)
+            # Reshape for xLSTM: (B*S, D) -> (B*S, 1, D)
+            # expert_input = inputs.reshape(B * S, 1, D)
+            # expert_output = self.experts[expert_idx](inputs)  # (B*S, 1, D)
+            expert_output: jax.Array = lax.switch(
+                expert_idx, self.experts, operand=inputs
             )
-            return jnp.sum(weighted_outputs, axis=0)
+            expert_output = expert_output.reshape(B * S, D)  # (B*S, D)
 
-        # Apply to all tokens
-        expert_outputs = jax.vmap(apply_expert_to_token)(
-            top_k_indices, top_k_weights, flat_h_t
-        )  # Shape: (B*S, D)
+            # Apply weights and mask
+            weighted_output = expert_output * expert_weights[..., None]  # (B*S, D)
+            masked_output = weighted_output * token_mask[..., None]  # (B*S, D)
 
-        final_hidden_states = expert_outputs.reshape(B, S, D)
+            return masked_output
+
+            # Vectorize across all experts
+
+        expert_outputs = jax.vmap(compute_expert_outputs, in_axes=(0, None))(
+            jnp.arange(self.num_experts), flat_h_t
+        )  # (num_experts, B*S, D)
+
+        # Sum contributions from all experts
+        final_outputs = jnp.sum(expert_outputs, axis=0)  # (B*S, D)
+        final_hidden_states = final_outputs.reshape(B, S, D)
 
         # --- Rest of the function remains the same ---
         z_loss = lax.cond(
