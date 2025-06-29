@@ -163,7 +163,7 @@ def main(cfg: DictConfig):
 
     # Model instance
     dtype_str = cfg["dtype"]
-    logger.info(f"Creating MoxE model with dtype={dtype_str}...")
+    logger.info(f"Creating xLSTM model with dtype={dtype_str}...")
     dtype = str2dtype(dtype_str)
 
     mesh_shape = tuple(args.mesh_shape) if hasattr(args, "mesh_shape") else (1,)
