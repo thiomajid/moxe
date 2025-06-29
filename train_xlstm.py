@@ -213,6 +213,7 @@ def main(cfg: DictConfig):
     model.train()
 
     train_data_ops = [
+        grain.Batch(args.per_device_train_batch_size, drop_remainder=True),
         DataCollatatorTransform(
             target_columns=["input_ids", "labels", "attention_mask"],
             collator=DataCollatorForLanguageModeling(
@@ -221,10 +222,10 @@ def main(cfg: DictConfig):
                 return_tensors="np",
             ),
         ),
-        grain.Batch(args.per_device_train_batch_size, drop_remainder=True),
     ]
 
     eval_data_ops = [
+        grain.Batch(args.per_device_eval_batch_size, drop_remainder=True),
         DataCollatatorTransform(
             target_columns=["input_ids", "labels", "attention_mask"],
             collator=DataCollatorForLanguageModeling(
@@ -233,7 +234,6 @@ def main(cfg: DictConfig):
                 return_tensors="np",
             ),
         ),
-        grain.Batch(args.per_device_eval_batch_size, drop_remainder=True),
     ]
 
     train_loader, eval_loader = create_dataloaders(
