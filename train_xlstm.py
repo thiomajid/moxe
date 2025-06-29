@@ -92,14 +92,16 @@ def eval_step(
 
 @functools.partial(
     nnx.jit,
-    static_argnames=("config", "seed", "mesh", "dtype"),
+    static_argnames=("config_state", "config_graphdef", "seed", "mesh", "dtype"),
 )
 def _create_sharded_model(
-    config: xLSTMLMModelConfig,
+    config_state: tp.Any,
+    config_graphdef: tp.Any,
     seed: int,
     mesh: Mesh,
     dtype=jnp.float32,
 ):
+    config: xLSTMLMModelConfig = nnx.merge(config_graphdef, config_state)
     rngs = nnx.Rngs(seed)
     model = xLSTMLMModel(config, mesh=mesh, rngs=rngs, dtype=dtype)
     state = nnx.state(model)
@@ -170,8 +172,10 @@ def main(cfg: DictConfig):
 
     model: tp.Optional[xLSTMLMModel] = None
     with mesh:
+        config_graphdef, config_state = nnx.split(config)
         model = _create_sharded_model(
-            config=config,
+            config_graphdef=config_graphdef,
+            config_state=config_state,
             seed=args.seed,
             mesh=mesh,
             dtype=dtype,
