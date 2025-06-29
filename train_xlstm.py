@@ -318,7 +318,6 @@ def main(cfg: DictConfig):
     ckpt_dir = Path(args.logging_dir).absolute()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # Use evaluation reconstruction loss for best model selection
     BEST_METRIC_KEY: tp.Final[str] = "eval_loss"
     options = ocp.CheckpointManagerOptions(
         max_to_keep=3,
@@ -523,7 +522,7 @@ def main(cfg: DictConfig):
                     "Logging final training metrics from last accumulation cycle..."
                 )
 
-                key_metric = "recon_loss"
+                key_metric = "loss"
                 if key_metric in final_computed_metrics:
                     latest_eval_metrics_for_ckpt = {
                         BEST_METRIC_KEY: float(final_computed_metrics[key_metric])
