@@ -9,7 +9,6 @@ import jax.numpy as jnp
 from flax import nnx
 
 from ...components.conv import CausalConv1d, CausalConv1dConfig
-from ...components.init import small_init_initializer
 from ...components.linear_headwise import (
     LinearHeadwiseExpand,
     LinearHeadwiseExpandConfig,
@@ -36,25 +35,32 @@ class sLSTMLayer(nnx.Module):
 
     config_class = sLSTMLayerConfig
 
-    def __init__(self, config: sLSTMLayerConfig, *, rngs: nnx.Rngs, dtype=jnp.float32):
-        self.config = config
-        self.dtype = dtype
+    def __init__(
+        self,
+        config: sLSTMLayerConfig,
+        *,
+        mesh: jax.sharding.Mesh,
+        rngs: nnx.Rngs,
+        dtype=jnp.float32,
+    ):
+        self.conv1d_kernel_size = config.conv1d_kernel_size
 
         # Initialize convolutional layer if needed
-        if self.config.conv1d_kernel_size > 0:
+        if config.conv1d_kernel_size > 0:
             self.conv1d = CausalConv1d(
                 rngs=rngs,
                 dtype=dtype,
+                mesh=mesh,
                 config=CausalConv1dConfig(
-                    feature_dim=self.config.embedding_dim,
-                    kernel_size=self.config.conv1d_kernel_size,
+                    feature_dim=config.embedding_dim,
+                    kernel_size=config.conv1d_kernel_size,
                 ),
             )
 
         # Initialize gate projections using headwise linear layers
         gate_config = LinearHeadwiseExpandConfig(
-            in_features=self.config.embedding_dim,
-            num_heads=self.config.num_heads,
+            in_features=config.embedding_dim,
+            num_heads=config.num_heads,
             bias=False,
         )
 
@@ -63,42 +69,48 @@ class sLSTMLayer(nnx.Module):
             config=gate_config,
             rngs=rngs,
             dtype=dtype,
+            mesh=mesh,
         )
 
         self.igate = LinearHeadwiseExpand(
             config=gate_config,
             rngs=rngs,
             dtype=dtype,
+            mesh=mesh,
         )
 
         self.zgate = LinearHeadwiseExpand(
             config=gate_config,
             rngs=rngs,
             dtype=dtype,
+            mesh=mesh,
         )
 
         self.ogate = LinearHeadwiseExpand(
             config=gate_config,
             rngs=rngs,
             dtype=dtype,
+            mesh=mesh,
         )
 
         # sLSTM cell and normalization
-        self.slstm_cell = sLSTMCell(self.config, rngs=rngs, dtype=dtype)
+        self.slstm_cell = sLSTMCell(config, mesh=mesh, rngs=rngs, dtype=dtype)
         self.group_norm = MultiHeadLayerNorm(
-            num_features=self.config.embedding_dim,
-            use_scale=self.config.group_norm_weight,
+            num_features=config.embedding_dim,
+            use_scale=config.group_norm_weight,
             rngs=rngs,
             dtype=dtype,
+            mesh=mesh,
         )
 
-        self.dropout = nnx.Dropout(rate=self.config.dropout, rngs=rngs)
+        self.dropout = nnx.Dropout(rate=config.dropout, rngs=rngs)
 
     def __call__(
         self,
         x: jax.Array,
         slstm_state: tp.Optional[jax.Array] = None,
         return_last_state: bool = False,
+        training: bool = False,
     ) -> tp.Union[jax.Array, tuple[jax.Array, dict[str, tp.Any]]]:
         """Process a sequence through the sLSTM layer.
 
@@ -113,15 +125,8 @@ class sLSTMLayer(nnx.Module):
         """
         B, S, _ = x.shape
 
-        # Apply convolution if configured
-        # if self.config.conv1d_kernel_size > 0:
-        #     x_conv = self.conv1d(x)
-        #     x_conv = jax.nn.swish(x_conv)  # SiLU is the same as swish
-        # else:
-        #     x_conv = x
-
         x_conv = jax.lax.cond(
-            self.config.conv1d_kernel_size > 0,
+            self.conv1d_kernel_size > 0,
             lambda _x: jax.nn.swish(self.conv1d(_x)),
             lambda _x: _x,
             operand=x,
@@ -138,7 +143,7 @@ class sLSTMLayer(nnx.Module):
 
         # Process through sLSTM cell
         y, slstm_state = self.slstm_cell(gates_combined, state=slstm_state)
-        y = self.dropout(y)
+        y = self.dropout(y, deterministic=not training)
 
         out = self.group_norm(y)
         out = out.transpose(0, 2, 1, 3).reshape(B, S, -1)
@@ -147,40 +152,3 @@ class sLSTMLayer(nnx.Module):
             return out, {"slstm_state": slstm_state}
         else:
             return out
-
-    def reset_parameters(self, rngs: nnx.Rngs) -> None:
-        self.slstm_cell.reset_parameters(rngs)
-        self.group_norm.reset_parameters(rngs)
-
-        init_fn = small_init_initializer(dim=self.config.embedding_dim)
-        self.igate.kernel = nnx.Param(
-            init_fn(
-                rngs.params(),
-                shape=self.igate.kernel.shape,
-                dtype=self.igate.kernel.dtype,
-            ),
-        )
-
-        self.fgate.kernel = nnx.Param(
-            init_fn(
-                rngs.params(),
-                shape=self.fgate.kernel.shape,
-                dtype=self.fgate.kernel.dtype,
-            ),
-        )
-
-        self.zgate.kernel = nnx.Param(
-            init_fn(
-                rngs.params(),
-                shape=self.zgate.kernel.shape,
-                dtype=self.zgate.kernel.dtype,
-            ),
-        )
-
-        self.ogate.kernel = nnx.Param(
-            init_fn(
-                rngs.params(),
-                shape=self.ogate.kernel.shape,
-                dtype=self.ogate.kernel.dtype,
-            ),
-        )

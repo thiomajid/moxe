@@ -63,13 +63,15 @@ def slstm_forward(
     chex.assert_equal(hidden_dim, states.shape[2])
 
     g = jnp.zeros(
-        (sequence_dim + 1, num_gates_t, batch_dim, hidden_dim),
+        shape=(sequence_dim + 1, num_gates_t, batch_dim, hidden_dim),
         dtype=x.dtype,
+        device=x.device,
     )
 
     states_all = jnp.zeros(
         (num_states, sequence_dim + 1, batch_dim, hidden_dim),
         dtype=x.dtype,
+        device=x.device,
     )
 
     states_all = states_all.at[:, 0].set(states)
@@ -85,6 +87,7 @@ def slstm_forward(
         Ry = jnp.matmul(hidden_reshaped, R_reshaped).reshape(
             batch_dim, num_heads, num_gates_r, head_dim
         )
+
         Ry = jnp.transpose(Ry, (0, 2, 1, 3)).reshape(batch_dim, -1)
 
         new_states, gates = pointwise_forward(current_x, Ry, b, current_states)
@@ -97,8 +100,11 @@ def slstm_forward(
 
         return (new_states, states_all, g), None
 
+    init_carry = (states, states_all, g)
     (final_state, states_all, g), _ = jax.lax.scan(
-        process_timestep, (states, states_all, g), jnp.arange(sequence_dim)
+        f=process_timestep,
+        init=init_carry,
+        xs=jnp.arange(sequence_dim),
     )
 
     return states_all, final_state, g
@@ -131,19 +137,19 @@ def slstm_forward_step(
         - New state: [num_states, 1, B, H]
         - Gate activations: [1, num_gates, B, H]
     """
-    num_states = states.shape[0]
+    # num_states = states.shape[0]
     batch_dim = states.shape[1]
-    hidden_dim = states.shape[2]
+    # hidden_dim = states.shape[2]
     num_heads = R.shape[0]
     head_dim = R.shape[2]
     num_gates_r = R.shape[1] // R.shape[2]
-    num_gates_t = b.shape[0] // hidden_dim
+    # num_gates_t = b.shape[0] // hidden_dim
 
     # Initialize arrays
-    g = jnp.zeros(
-        (1, num_gates_t, batch_dim, hidden_dim),
-        dtype=x.dtype,
-    )
+    # g = jnp.zeros(
+    #     (1, num_gates_t, batch_dim, hidden_dim),
+    #     dtype=x.dtype,
+    # )
 
     # Compute recurrent projection
     # Reshape hidden state to [B, NH, 1, HD]
