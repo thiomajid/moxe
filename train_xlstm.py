@@ -118,7 +118,7 @@ def main(cfg: DictConfig):
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
     logger = logging.getLogger(__name__)
-    logger.info("Starting MoxE training...")
+    logger.info("Starting xLSTM language model training...")
 
     parser = HfArgumentParser(CustomArgs)
 

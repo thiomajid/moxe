@@ -17,7 +17,7 @@ from ...components.ln import MultiHeadLayerNorm
 from .cell import sLSTMCell, sLSTMCellConfig
 
 
-@dataclass
+@dataclass(unsafe_hash=True, order=True)
 class sLSTMLayerConfig(sLSTMCellConfig):
     embedding_dim: int = -1
     num_heads: int = 4  # this must divide the hidden size, is not yet supported by all versions in this directory

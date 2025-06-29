@@ -18,7 +18,7 @@ from ...utils import UpProjConfigMixin
 from .cell import mLSTMCell, mLSTMCellConfig
 
 
-@dataclass
+@dataclass(unsafe_hash=True, order=True)
 class mLSTMLayerConfig(UpProjConfigMixin):
     conv1d_kernel_size: int = 4
     qkv_proj_blocksize: int = 4

@@ -28,7 +28,7 @@ DTYPE_DICT = {
 DTYPES = Literal["bfloat16", "float16", "float32"]
 
 
-@dataclass
+@dataclass(unsafe_hash=True, order=True)
 class sLSTMCellConfig:
     hidden_size: int = -1
     num_heads: int = 4  # must divide the hidden size
