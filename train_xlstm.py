@@ -6,6 +6,7 @@ import time
 import typing as tp
 from dataclasses import asdict
 from pathlib import Path
+from pprint import pprint
 from typing import cast
 
 import grain.python as grain
@@ -154,7 +155,7 @@ def main(cfg: DictConfig):
     config_dict = OmegaConf.to_container(cfg["model"]["xlstm"], resolve=True)
     config_dict["vocab_size"] = tokenizer.vocab_size
     config_dict["pad_token_id"] = tokenizer.pad_token_id
-    print(config_dict)
+    pprint(config_dict)
     config = parse_xlstm_config_dict(config_dict)
     config.pad_token_id = tokenizer.pad_token_id
 
@@ -239,7 +240,7 @@ def main(cfg: DictConfig):
         logger,
         args,
         tokenizer,
-        config,
+        max_seq_length=config.context_length,
         train_data_ops=train_data_ops,
         eval_data_ops=eval_data_ops,
     )
