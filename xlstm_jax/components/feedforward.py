@@ -34,7 +34,7 @@ def get_act_fn(act_fn_name: str) -> Callable[[jax.Array], jax.Array]:
         )
 
 
-@dataclass
+@dataclass(unsafe_hash=True, order=True)
 class FeedForwardConfig(UpProjConfigMixin):
     proj_factor: float = 1.3
     act_fn: str = "gelu"

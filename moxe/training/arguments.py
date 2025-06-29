@@ -83,6 +83,9 @@ class CustomArgs(TrainingArguments):
 
     trust_remote_code: bool = field(default=True)
 
+    mesh_shape: tuple[int, ...] = field(default_factory=lambda: (2, 4))
+    axis_names: tuple[str, ...] = field(default_factory=lambda: ("data", "model"))
+
     def __post_init__(self):
         super().__post_init__()
         assert self.z_loss_coef >= 0, "Router loss coefficient must be non-negative."
@@ -93,11 +96,9 @@ class CustomArgs(TrainingArguments):
             "Difficulty loss coefficient must be non-negative."
         )
         assert self.group_loss_coef >= 0, "Group loss coefficient must be non-negative."
-        # # Initialize accelerator_config if it doesn't exist
-        # if self.accelerator_config is None:
-        #     self.accelerator_config = {
-        #         "gradient_accumulation_steps": self.gradient_accumulation_steps
-        #     }
 
         if self.eval_dataset_url is None:
             self.eval_dataset_url = self.train_dataset_url
+
+        self.mesh_shape = tuple(self.mesh_shape)
+        self.axis_names = tuple(self.axis_names)

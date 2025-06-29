@@ -13,7 +13,7 @@ from ..xlstm_block import xLSTMBlock, xLSTMBlockConfig
 from .layer import sLSTMLayerConfig
 
 
-@dataclass
+@dataclass(unsafe_hash=True, order=True)
 class sLSTMBlockConfig:
     slstm: sLSTMLayerConfig = field(default_factory=sLSTMLayerConfig)
     feedforward: Optional[FeedForwardConfig] = field(default_factory=FeedForwardConfig)

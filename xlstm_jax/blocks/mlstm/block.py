@@ -12,7 +12,7 @@ from ..xlstm_block import xLSTMBlock, xLSTMBlockConfig
 from .layer import mLSTMLayerConfig
 
 
-@dataclass
+@dataclass(unsafe_hash=True, order=True)
 class mLSTMBlockConfig:
     mlstm: mLSTMLayerConfig = field(default_factory=mLSTMLayerConfig)
 

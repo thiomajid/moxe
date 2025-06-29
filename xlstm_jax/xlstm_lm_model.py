@@ -13,7 +13,7 @@ from .components.init import small_init_initializer
 from .xlstm_block_stack import xLSTMBlockStack, xLSTMBlockStackConfig
 
 
-@dataclass
+@dataclass(unsafe_hash=True, order=True)
 class xLSTMLMModelConfig(xLSTMBlockStackConfig):
     vocab_size: int = -1
     tie_weights: bool = False

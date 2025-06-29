@@ -179,6 +179,8 @@ def create_dataloaders(
     args: CustomArgs,
     tokenizer: AutoTokenizer,
     config: MoxEConfig,
+    train_data_ops: list[grain.MapTransform],
+    eval_data_ops: list[grain.MapTransform],
 ):
     logger.info(
         f"Loading training dataset from {args.train_dataset_url} with {args.train_samples} samples"
@@ -204,7 +206,7 @@ def create_dataloaders(
         shuffle=True,
         seed=args.seed,
         shard_options=grain.NoSharding(),
-        num_epochs=int(args.num_train_epochs),
+        num_epochs=1,
     )
 
     train_loader = grain.DataLoader(
@@ -212,17 +214,7 @@ def create_dataloaders(
         sampler=train_sampler,
         worker_count=4,
         worker_buffer_size=2,
-        operations=[
-            grain.Batch(args.per_device_train_batch_size, drop_remainder=True),
-            DataCollatatorTransform(
-                target_columns=["input_ids", "labels", "attention_mask"],
-                collator=DataCollatorForLanguageModeling(
-                    tokenizer=tokenizer,
-                    mlm=False,
-                    return_tensors="np",
-                ),
-            ),
-        ],
+        operations=train_data_ops,
     )
 
     logger.info(
@@ -249,7 +241,7 @@ def create_dataloaders(
         shuffle=False,
         seed=args.seed,
         shard_options=grain.NoSharding(),
-        num_epochs=int(args.num_train_epochs),
+        num_epochs=1,
     )
 
     eval_loader = grain.DataLoader(
@@ -257,17 +249,7 @@ def create_dataloaders(
         sampler=eval_sampler,
         worker_count=4,
         worker_buffer_size=2,
-        operations=[
-            grain.Batch(args.per_device_eval_batch_size),
-            DataCollatatorTransform(
-                target_columns=["input_ids", "labels", "attention_mask"],
-                collator=DataCollatorForLanguageModeling(
-                    tokenizer=tokenizer,
-                    mlm=False,
-                    return_tensors="np",
-                ),
-            ),
-        ],
+        operations=eval_data_ops,
     )
 
     return train_loader, eval_loader

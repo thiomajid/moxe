@@ -10,7 +10,7 @@ from flax import nnx
 from xlstm_jax.components.init import small_init_initializer
 
 
-@dataclass
+@dataclass(unsafe_hash=True, order=True)
 class LinearHeadwiseExpandConfig:
     in_features: int = 0
     # this is the number of heads that the in_features are split into

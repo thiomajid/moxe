@@ -10,7 +10,7 @@ from flax import nnx
 from jax.sharding import Mesh
 
 
-@dataclass
+@dataclass(unsafe_hash=True, order=True)
 class CausalConv1dConfig:
     feature_dim: int = None  # F
     kernel_size: int = 4

@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -6,6 +7,8 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 import orbax.checkpoint as ocp
 from flax import nnx
+
+from moxe.tensorboard import TensorBoardLogger
 
 
 class Sequential(nnx.Module):
@@ -121,3 +124,51 @@ def load_sharded_checkpoint_state(
     merged_model = nnx.merge(graphdef, restored_state)
     print("Merged state with the model.")
     return merged_model
+
+
+def checkpoint_post_eval(
+    logger: logging.Logger,
+    model: nnx.Module,
+    metrics: nnx.MultiMetric,
+    tb_logger: TensorBoardLogger,
+    best_metric_key: str,
+    checkpoint_manager: ocp.CheckpointManager,
+    global_step: int,
+    epoch: int,
+):
+    computed_eval_metrics = metrics.compute()
+    logger.info(f"Computed eval metrics: {computed_eval_metrics}")
+
+    # Log evaluation metrics to TensorBoard
+    for metric, value in computed_eval_metrics.items():
+        tb_logger.log_scalar(f"eval/{metric}", value, global_step)
+
+        # Log evaluation results
+    eval_log_data = {
+        f"eval_{k}": f"{v.item():.6f}" for k, v in computed_eval_metrics.items()
+    }
+    logger.info(f"Epoch {epoch + 1} Evaluation Results: {eval_log_data}")
+
+    # Update metrics for checkpointing and save checkpoint
+    key_metric = "recon_loss"
+    if key_metric in computed_eval_metrics:
+        latest_eval_metrics_for_ckpt = {
+            best_metric_key: float(computed_eval_metrics[key_metric])
+        }
+
+        logger.info(
+            f"Saving checkpoint at end of epoch {epoch + 1} (step {global_step}) with eval_recon_loss={latest_eval_metrics_for_ckpt[best_metric_key]:.6f}..."
+        )
+
+        state = nnx.state(model)
+        checkpoint_manager.save(
+            global_step,
+            args=ocp.args.PyTreeSave(state),
+            metrics=latest_eval_metrics_for_ckpt,
+        )
+        checkpoint_manager.wait_until_finished()
+        logger.info(f"Checkpoint saved at end of epoch {epoch + 1}")
+    else:
+        logger.warning(
+            f"Key metric '{key_metric}' not found in eval metrics, skipping checkpoint save"
+        )

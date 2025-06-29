@@ -14,7 +14,7 @@ from .blocks.slstm.block import sLSTMBlock, sLSTMBlockConfig
 from .components.ln import LayerNorm
 
 
-@dataclass
+@dataclass(unsafe_hash=True, order=True)
 class xLSTMBlockStackConfig:
     mlstm_block: Optional[mLSTMBlockConfig] = None
     slstm_block: Optional[sLSTMBlockConfig] = None
