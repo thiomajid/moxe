@@ -14,7 +14,7 @@ from .xlstm_block_stack import xLSTMBlockStack, xLSTMBlockStackConfig
 
 
 @dataclass(unsafe_hash=True, order=True)
-class xLSTMLMModelConfig(xLSTMBlockStackConfig, nnx.Module):
+class xLSTMLMModelConfig(xLSTMBlockStackConfig):
     vocab_size: int = -1
     tie_weights: bool = False
     weight_decay_on_embedding: bool = False
