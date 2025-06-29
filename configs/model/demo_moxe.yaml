@@ -13,7 +13,7 @@ ffn_dim: 1024
 group_wise_loss: "kl_div"
 
 xlstm:
-  pad_token_idx: 1
+  pad_token_id: 1
   vocab_size: 48
   context_length: 10
   num_blocks: 1

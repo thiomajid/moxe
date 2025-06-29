@@ -19,7 +19,7 @@ class xLSTMLMModelConfig(xLSTMBlockStackConfig):
     tie_weights: bool = False
     weight_decay_on_embedding: bool = False
     add_embedding_dropout: bool = False
-    pad_token_idx: int = 1
+    pad_token_id: int = 1
 
 
 class xLSTMLMModel(nnx.Module):
@@ -94,7 +94,7 @@ class xLSTMLMModel(nnx.Module):
             self.shared_weight = None
 
         self.tie_weights = config.tie_weights
-        self.pad_token_idx = config.pad_token_idx
+        self.pad_token_id = config.pad_token_id
 
     def __call__(self, input_ids: jax.Array, training: bool = False):
         """Forward pass through the model.
@@ -114,7 +114,7 @@ class xLSTMLMModel(nnx.Module):
         else:
             embeddings = self.token_embedding(input_ids)
 
-        padding_mask = create_padding_mask(input_ids, self.pad_token_idx)
+        padding_mask = create_padding_mask(input_ids, self.pad_token_id)
         embeddings = apply_padding_mask_with_gradient_stop(embeddings, padding_mask)
 
         hidden_states = self.embedding_dropout(embeddings)

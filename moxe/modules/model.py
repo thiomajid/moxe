@@ -20,7 +20,7 @@ class MoxEModel(nnx.Module):
         rngs: nnx.Rngs,
         dtype=jnp.float32,
     ):
-        self.pad_token_idx = config.xlstm.pad_token_idx
+        self.pad_token_id = config.xlstm.pad_token_id
 
         self.token_embedding = nnx.Embed(
             num_embeddings=config.xlstm.vocab_size,
@@ -59,7 +59,7 @@ class MoxEModel(nnx.Module):
         training: bool = False,
     ):
         h_t = self.token_embedding(input_ids)
-        padding_mask = create_padding_mask(input_ids, self.pad_token_idx)
+        padding_mask = create_padding_mask(input_ids, self.pad_token_id)
         h_t = apply_padding_mask_with_gradient_stop(h_t, padding_mask)
 
         h_t = jax.lax.cond(
