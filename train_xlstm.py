@@ -146,12 +146,16 @@ def main(cfg: DictConfig):
         tokenizer.pad_token = tokenizer.eos_token
         logger.warning("Padding token set to EOS token.")
 
+    if tokenizer.padding_side == "right":
+        tokenizer.padding_side = "left"
+        logger.warning("Changed the tokenizer's padding_side from left to right")
+
     config_dict = OmegaConf.to_container(cfg["model"]["xlstm"], resolve=True)
     config_dict["vocab_size"] = tokenizer.vocab_size
     config_dict["pad_token_idx"] = tokenizer.pad_token_idx
     print(config_dict)
     config = parse_xlstm_config_dict(config_dict)
-    config.pad_token_id = tokenizer.pad_token_id
+    config.pad_token_idx = tokenizer.pad_token_id
 
     log_node_devices_stats(logger)
 

@@ -58,3 +58,7 @@ resume_from_checkpoint: "artifacts"
 hub_model_id: "thiomajid/moxe_v0_with_ffn"
 remove_unused_columns: false
 trust_remote_code: true
+
+
+axis_names: ["dp", "tp"]
+mesh_shape: [4, 2]
