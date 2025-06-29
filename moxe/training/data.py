@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import os
+import typing as tp
 from typing import Literal, Optional, Union
 
 import grain.python as grain
@@ -8,6 +9,8 @@ from datasets import Dataset as HfDataset
 from datasets import IterableDataset, load_dataset, load_from_disk
 from tqdm import tqdm
 from transformers import AutoTokenizer, DataCollatorForLanguageModeling
+
+from xlstm_jax import xLSTMLMModelConfig
 
 from ..config import MoxEConfig
 from .arguments import CustomArgs
@@ -178,7 +181,7 @@ def create_dataloaders(
     logger: logging.Logger,
     args: CustomArgs,
     tokenizer: AutoTokenizer,
-    config: MoxEConfig,
+    config: tp.Union[MoxEConfig, xLSTMLMModelConfig],
     train_data_ops: list[grain.MapTransform],
     eval_data_ops: list[grain.MapTransform],
 ):
@@ -186,11 +189,17 @@ def create_dataloaders(
         f"Loading training dataset from {args.train_dataset_url} with {args.train_samples} samples"
     )
 
+    max_seq_length = (
+        config.xlstm.context_length
+        if isinstance(config, MoxEConfig)
+        else config.context_length
+    )
+
     train_data = get_dataset(
         hub_url=args.train_dataset_url,
         subset=args.train_subset,
         features=args.features,
-        max_seq_length=config.xlstm.context_length,
+        max_seq_length=max_seq_length,
         tokenizer=tokenizer,
         split=args.train_split,
         num_samples=args.train_samples,
@@ -225,7 +234,7 @@ def create_dataloaders(
         hub_url=args.eval_dataset_url,
         subset=args.eval_subset,
         features=args.features,
-        max_seq_length=config.xlstm.context_length,
+        max_seq_length=max_seq_length,
         tokenizer=tokenizer,
         split=args.eval_split,
         num_samples=args.eval_samples,
