@@ -1,7 +1,7 @@
 num_experts: 8
 top_k_experts: 2
 num_layers: 8
-moe_layer_type: "mlstm"
+moe_layer_type: "moxe"
 router_type: "conditioned_addition"
 expert_type: "xlstm"
 modulation_bias: "proportional"
@@ -16,9 +16,9 @@ xlstm:
   pad_token_idx: 1
   vocab_size: 48
   context_length: 10
-  num_blocks: 2
+  num_blocks: 1
   embedding_dim: 32
-  slstm_at: [1]
+  # slstm_at: [1]
 
   mlstm_block:
     mlstm:

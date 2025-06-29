@@ -126,11 +126,10 @@ class MoxELayer(nnx.Module):
             token_mask = jnp.any(expert_mask, axis=-1)  # (B*S,)
 
             # Apply expert to ALL tokens (will be masked out later)
-            # Reshape for xLSTM: (B*S, D) -> (B*S, 1, D)
             # expert_input = inputs.reshape(B * S, 1, D)
-            # expert_output = self.experts[expert_idx](inputs)  # (B*S, 1, D)
+            expert_input = inputs.reshape(B * S, 1, D)
             expert_output: jax.Array = lax.switch(
-                expert_idx, self.experts, operand=inputs
+                expert_idx, self.experts, operand=expert_input
             )
             expert_output = expert_output.reshape(B * S, D)  # (B*S, D)
 
