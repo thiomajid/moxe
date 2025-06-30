@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import jax
-import jax.numpy as jnp
 import jax.tree_util as jtu
 import orbax.checkpoint as ocp
 from flax import nnx
@@ -17,12 +16,9 @@ class Sequential(nnx.Module):
         self._num_modules = len(modules)
 
     def __call__(self, x):
-        def _module_scan(carry, idx: jax.Array):
-            next_state = jax.lax.switch(idx, self.modules, operand=carry)
-            return next_state, None
-
-        out, _ = jax.lax.scan(f=_module_scan, init=x, xs=jnp.arange(self._num_modules))
-        return out
+        for module in self.modules:
+            x = module(x)
+        return x
 
     def __len__(self):
         return self._num_modules
