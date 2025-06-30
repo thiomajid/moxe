@@ -653,7 +653,7 @@ def main(cfg: DictConfig):
 
     # Save final model state
     if global_step > 0:
-        final_model_state = nnx.state(model)
+        final_model_state = nnx.state(model, nnx.Param)
         logger.info(
             f"Saving final model state at step {global_step} to be considered by CheckpointManager with metrics {latest_eval_metrics_for_ckpt}."
         )
@@ -691,7 +691,7 @@ def main(cfg: DictConfig):
     else:
         logger.warning("CheckpointManager did not identify a best checkpoint.")
         if global_step > 0:
-            final_model_state = nnx.state(model)
+            final_model_state = nnx.state(model, nnx.Param)
             logger.info(
                 f"Saving current final model state directly to {target_ckpt_deployment_path} as a fallback."
             )

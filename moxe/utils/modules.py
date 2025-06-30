@@ -160,7 +160,7 @@ def checkpoint_post_eval(
             f"Saving checkpoint at end of epoch {epoch + 1} (step {global_step}) with eval_loss={latest_eval_metrics_for_ckpt[best_metric_key]:.6f}..."
         )
 
-        state = nnx.state(model)
+        state = nnx.state(model, nnx.Param)
         checkpoint_manager.save(
             global_step,
             args=ocp.args.PyTreeSave(state),
