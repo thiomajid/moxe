@@ -43,7 +43,7 @@ fp16: false
 use_cpu: false
 gradient_checkpointing: false
 
-output_dir: "artifacts"
+output_dir: "final_output"
 logging_dir: "artifacts"
 report_to: "tensorboard"
 logging_steps: 2
