@@ -363,7 +363,7 @@ def main(cfg: DictConfig):
     )
 
     GENERATION_SAMPLES = ["Once upon a time", "There was a girl", "Next to the tree"]
-    MAX_NEW_TOKENS = 100
+    MAX_NEW_TOKENS = 300
     GREEDY = False
     TEMPERATURE = 0.85
 
@@ -635,6 +635,9 @@ def main(cfg: DictConfig):
             trainer_config_dict.pop("hub_token")
         json.dump(trainer_config_dict, f, indent=4)
     logger.info(f"Trainer config saved to {artifacts_dir / 'trainer_config.json'}")
+
+    # Saving the tokenizer
+    tokenizer.save_pretrained(artifacts_dir)
 
     # Save timing summary
     timing_summary = {
