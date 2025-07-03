@@ -1,6 +1,6 @@
 num_experts: 8
 top_k_experts: 2
-num_layers: 8
+num_layers: 2
 moe_layer_type: "moxe"
 router_type: "conditioned_addition"
 expert_type: "xlstm"
@@ -9,7 +9,7 @@ gate_bias: true
 gamma: 0.7
 eps: 0.0000001
 difficulty_threshold: 0.9
-ffn_dim: 1024
+ffn_dim: 128
 group_wise_loss: "kl_div"
 
 xlstm:

@@ -33,7 +33,7 @@ def create_sharded_model(mesh: Mesh, config: MoxEConfig):
 @hydra.main(config_path="./configs", config_name="config", version_base="1.1")
 def main(cfg: DictConfig):
     config = MoxEConfig.from_dict(OmegaConf.to_container(cfg["model"], resolve=True))
-    USE_JIT = False
+    USE_JIT = True
     model = None
 
     dummy_input = jax.random.randint(
@@ -53,40 +53,25 @@ def main(cfg: DictConfig):
 
     print(count_parameters(model))
 
-    jitted_model = nnx.jit(
-        model,
-        # static_argnames=(
-        #     "return_layers_outputs",
-        #     "compute_d_loss",
-        #     "compute_group_loss",
-        # ),
-    )
+    jitted_model = nnx.jit(model)
 
     output = None
     if USE_JIT:
         output = jitted_model(
             dummy_input,
-            # return_layers_outputs=True,
-            # compute_d_loss=True,
-            # compute_group_loss=True,
+            compute_d_loss=True,
+            compute_group_loss=True,
         )
     else:
         output = model(
             dummy_input,
-            # return_layers_outputs=True,
-            # compute_d_loss=True,
-            # compute_group_loss=True,
+            compute_d_loss=True,
+            compute_group_loss=True,
         )
 
     print(output.logits.shape)
-
-    # if output.layers_outputs is not None:
-    #     print(f"Has {len(output.layers_outputs)} layers")
+    print(len(output.layers_outputs))
 
 
 if __name__ == "__main__":
     main()
-    # tree = (1, 2)
-    # graph_def, state = nnx.split(tree)
-
-    # print(nnx.merge(graph_def, state))

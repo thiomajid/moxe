@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 from jax import lax
+from jax.sharding import Mesh
 
 from ..config import MoxEConfig
 from ..ops import (
@@ -60,7 +61,7 @@ class BiasConditionedGate(nnx.Module):
         self,
         config: MoxEConfig,
         *,
-        mesh: jax.sharding.Mesh,
+        mesh: Mesh,
         rngs: nnx.Rngs,
         dtype=jnp.float32,
     ):
@@ -207,3 +208,39 @@ class BiasConditionedGate(nnx.Module):
             d_loss=d_loss,
             group_loss=group_loss,
         )
+
+
+class StandardMoEGate(nnx.Module):
+    def __init__(
+        self,
+        config: MoxEConfig,
+        *,
+        mesh: Mesh,
+        rngs: nnx.Rngs,
+        dtype=jnp.float32,
+    ):
+        self.num_experts = config.num_experts
+
+        self.router = nnx.Linear(
+            in_features=config.xlstm.embedding_dim,
+            out_features=self.num_experts,
+            use_bias=config.gate_bias,
+            dtype=dtype,
+            param_dtype=dtype,
+            rngs=rngs,
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.lecun_normal(),
+                sharding=(None, "tp"),
+                mesh=mesh,
+            ),
+            bias_init=nnx.with_partitioning(
+                nnx.initializers.zeros_init(),
+                sharding=("tp",),
+                mesh=mesh,
+            ),
+        )
+
+    def __call__(self, h_t: jax.Array):
+        gate_logits = self.router(h_t.reshape(-1, h_t.shape[-1]))
+        # router_probs = jax.nn.softmax(gate_logits)
+        return gate_logits

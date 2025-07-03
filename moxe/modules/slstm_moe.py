@@ -20,26 +20,7 @@ class sLSTMMoELayer(xLSTMMoELayer):
         rngs: nnx.Rngs,
         dtype=jnp.float32,
     ):
-        super().__init__(config)
-
-        self.gate = nnx.Linear(
-            config.xlstm.embedding_dim,
-            config.num_experts,
-            use_bias=config.gate_bias,
-            dtype=dtype,
-            param_dtype=dtype,
-            rngs=rngs,
-            kernel_init=nnx.with_partitioning(
-                nnx.initializers.lecun_normal(),
-                sharding=(None, "tp"),
-                mesh=mesh,
-            ),
-            bias_init=nnx.with_partitioning(
-                nnx.initializers.zeros_init(),
-                sharding=("tp",),
-                mesh=mesh,
-            ),
-        )
+        super().__init__(config, mesh=mesh, rngs=rngs, dtype=dtype)
 
         # use only sLSTM blocks as a sequence mixer for this kind of layer
         mixer_config = deepcopy(config.xlstm)

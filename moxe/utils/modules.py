@@ -1,6 +1,7 @@
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import jax
 import jax.tree_util as jtu
@@ -42,6 +43,13 @@ class ModuleList(nnx.Module):
 
     def __getitem__(self, idx: int):
         return self.modules[idx]
+
+    def __call__(self, index: Any, *args):
+        return jax.lax.switch(
+            index,
+            self.modules,
+            *args,
+        )
 
 
 @dataclass
