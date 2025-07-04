@@ -1,6 +1,8 @@
 import functools
 import json
 import logging
+import random
+import shutil
 import time
 import typing as tp
 from dataclasses import asdict
@@ -328,12 +330,14 @@ def main(cfg: DictConfig):
         save_dir = Path(cfg["checkpoint_save_dir"])
 
         if not save_dir.exists():
-            snapshot_download(
-                repo_id=cfg["checkpoint_hub_url"],
-                local_dir=save_dir,
-                token=args.hub_token,
-                revision=cfg.get("checkpoint_revision", "main"),
-            )
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+        snapshot_download(
+            repo_id=cfg["checkpoint_hub_url"],
+            local_dir=save_dir,
+            token=args.hub_token,
+            revision=cfg.get("checkpoint_revision", "main"),
+        )
 
         ckpt_path = save_dir / "model_checkpoint/default"
         ckpt_path = ckpt_path.absolute()
@@ -458,7 +462,7 @@ def main(cfg: DictConfig):
     ckpt_dir = Path(args.logging_dir).absolute()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    BEST_METRIC_KEY = "eval_loss"
+    BEST_METRIC_KEY = "eval_perplexity"
     options = ocp.CheckpointManagerOptions(
         max_to_keep=3,
         best_fn=lambda metrics: metrics[BEST_METRIC_KEY],
@@ -511,180 +515,243 @@ def main(cfg: DictConfig):
 
     for epoch in range(args.num_train_epochs):
         epoch_start_time = time.perf_counter()
-        logger.info(f"Starting epoch {epoch + 1}/{args.num_train_epochs}")
-
-        # Reset metrics for the epoch
+        logger.info(f"Starting Epoch {epoch + 1}/{args.num_train_epochs}")
         train_metrics.reset()
 
-        # Training phase
-        for step, batch in enumerate(
-            tqdm(
-                train_loader,
-                desc=f"Training Epoch {epoch + 1}",
-                leave=False,
-            )
-        ):
-            # Prepare batch for sharding
-            input_ids = jax.device_put(jnp.array(batch["input_ids"]), DATA_SHARDING)
-            labels = jax.device_put(jnp.array(batch["labels"]), DATA_SHARDING)
+        epoch_desc = f"Epoch {epoch + 1}/{args.num_train_epochs}"
+        with tqdm(
+            total=steps_dict["steps_per_epoch"],
+            desc=epoch_desc,
+            leave=True,
+        ) as pbar:
+            pbar.set_description(epoch_desc)
+            for step, batch in enumerate(train_loader):
+                global_step += 1  # Count every batch as a step
 
-            _batch = (input_ids, labels)
+                # Prepare batch - Squeeze on axis 0 because Grain creates an additional axis
+                input_ids = jnp.array(batch["input_ids"])
+                labels = jnp.array(batch["labels"], dtype=jnp.int32)
 
-            # Compute gradients and update metrics
-            loss, grads, grad_norm = compute_grads_and_metrics(
-                model=model,
-                metrics=train_metrics,
-                batch=_batch,
-                z_loss_coef=args.z_loss_coef,
-                load_balancing_loss_coef=args.load_balancing_loss_coef,
-                d_loss_coef=args.d_loss_coef,
-                group_loss_coef=args.group_loss_coef,
-            )
+                if input_ids.ndim == 3 and input_ids.shape[0] == 1:
+                    input_ids = input_ids.squeeze(0)
 
-            # Apply gradients
-            apply_gradients(optimizer, grads)
+                if labels.ndim == 3 and labels.shape[0] == 1:
+                    labels = labels.squeeze(0)
 
-            global_step += 1
+                # Apply data sharding
+                input_ids = jax.device_put(input_ids, DATA_SHARDING)
+                labels = jax.device_put(labels, DATA_SHARDING)
 
-            # Check if we need to update the optimizer (for MultiSteps)
-            if global_step % args.gradient_accumulation_steps == 0:
-                global_optimizer_step += 1
+                _batch = (input_ids, labels)
 
-            # Log training metrics
-            if global_step % args.logging_steps == 0:
-                computed_metrics = train_metrics.compute()
+                # Compute gradients and metrics
+                loss, grads, grad_norm = compute_grads_and_metrics(
+                    model=model,
+                    metrics=train_metrics,
+                    batch=_batch,
+                    z_loss_coef=args.z_loss_coef,
+                    load_balancing_loss_coef=args.load_balancing_loss_coef,
+                    d_loss_coef=args.d_loss_coef,
+                    group_loss_coef=args.group_loss_coef,
+                )
+
+                apply_gradients(optimizer, grads)
+
+                # Check if it's time for optimizer step
+                is_update_step = (step + 1) % args.gradient_accumulation_steps == 0
+                if is_update_step:
+                    global_optimizer_step += 1
+
+                    # Log learning rate
+                    current_lr = cosine_schedule(global_optimizer_step)
+                    tb_logger.log_learning_rate(current_lr, global_optimizer_step)
+
+                # Logging
+                if global_step % args.logging_steps == 0:
+                    computed_metrics = train_metrics.compute()
+
+                    # Log metrics to TensorBoard
+                    for metric, value in computed_metrics.items():
+                        tb_logger.log_scalar(f"train/{metric}", value, global_step)
+
+                    train_metrics.reset()
+
+                # Update progress bar
                 current_lr = cosine_schedule(global_optimizer_step)
+                postfix_data = {
+                    "step": f"{global_step}/{max_steps}",
+                    "opt_step": f"{global_optimizer_step}/{max_optimizer_steps}",
+                    "lr": f"{current_lr:.2e}",
+                    "loss": f"{loss.item():.6f}",
+                    "grad_norm": f"{grad_norm.item():.4f}",
+                }
 
-                for metric_name, metric_value in computed_metrics.items():
-                    tb_logger.log_scalar(
-                        f"train/{metric_name}",
-                        metric_value.item(),
-                        global_step,
+                # Add best metrics
+                if (
+                    BEST_METRIC_KEY in latest_eval_metrics_for_ckpt
+                    and latest_eval_metrics_for_ckpt[BEST_METRIC_KEY] != float("inf")
+                ):
+                    postfix_data["best_loss"] = (
+                        f"{latest_eval_metrics_for_ckpt[BEST_METRIC_KEY]:.6f}"
                     )
 
-                tb_logger.log_scalar(
-                    "train/learning_rate", current_lr.item(), global_step
-                )
+                current_desc = f"Epoch {epoch + 1}/{args.num_train_epochs} (Step {global_step}/{max_steps}, Opt {global_optimizer_step}/{max_optimizer_steps})"
+                pbar.set_description(current_desc)
+                pbar.set_postfix(postfix_data)
+                pbar.update(1)
 
-                # Reset metrics after logging
-                train_metrics.reset()
+            # --- Evaluation after each epoch ---
 
-            # Save checkpoint
-            if global_step % args.save_steps == 0:
-                logger.info(f"Saving checkpoint at step {global_step}")
-
-                # We'll save manually here since we're in the middle of training
-                state = nnx.state(model, nnx.Param)
-                manager.save(
-                    global_step,
-                    args=ocp.args.PyTreeSave(state),
-                    metrics=latest_eval_metrics_for_ckpt,
-                )
-
-        # Evaluation phase
+        eval_start_time = time.perf_counter()
         logger.info(f"Starting evaluation after epoch {epoch + 1}...")
         eval_metrics.reset()
 
-        model.eval()
+        eval_batch_count = 0
+        eval_data_available = True
 
-        for batch in tqdm(
-            eval_loader,
-            desc=f"Evaluating Epoch {epoch + 1}",
-            leave=False,
-        ):
-            input_ids = jax.device_put(jnp.array(batch["input_ids"]), DATA_SHARDING)
-            labels = jax.device_put(jnp.array(batch["labels"]), DATA_SHARDING)
+        try:
+            for batch in tqdm(
+                eval_loader,
+                desc=f"Evaluating Epoch {epoch + 1}",
+                leave=False,
+            ):
+                eval_batch_count += 1
+                input_ids = jnp.array(batch["input_ids"])
+                labels = jnp.array(batch["labels"], dtype=jnp.int32)
 
-            _batch = (input_ids, labels)
-            eval_step(model=model, metrics=eval_metrics, batch=_batch)
+                if input_ids.ndim == 3 and input_ids.shape[0] == 1:
+                    input_ids = input_ids.squeeze(0)
 
-        # Log evaluation metrics and save checkpoint
-        checkpoint_post_eval(
-            logger=logger,
-            model=model,
-            metrics=eval_metrics,
-            tb_logger=tb_logger,
-            best_metric_key=BEST_METRIC_KEY,
-            checkpoint_manager=manager,
-            global_step=global_step,
-            epoch=epoch,
-        )
+                if labels.ndim == 3 and labels.shape[0] == 1:
+                    labels = labels.squeeze(0)
 
-        # Text generation for monitoring
-        if epoch % 1 == 0:  # Generate every epoch
-            logger.info("Generating sample text...")
+                # Apply data sharding
+                input_ids = jax.device_put(input_ids, DATA_SHARDING)
+                labels = jax.device_put(labels, DATA_SHARDING)
+                _batch = (input_ids, labels)
+
+                eval_step(
+                    model=model,
+                    metrics=eval_metrics,
+                    batch=_batch,
+                    z_loss_coef=args.z_loss_coef,
+                    load_balancing_loss_coef=args.load_balancing_loss_coef,
+                    d_loss_coef=args.d_loss_coef,
+                    group_loss_coef=args.group_loss_coef,
+                )
+        except Exception as e:
+            logger.error(f"Error during evaluation: {e}")
+            eval_data_available = False
+
+        logger.info(f"Processed {eval_batch_count} evaluation batches")
+
+        if eval_batch_count > 0 and eval_data_available:
+            checkpoint_post_eval(
+                logger=logger,
+                model=model,
+                metrics=eval_metrics,
+                tb_logger=tb_logger,
+                best_metric_key=BEST_METRIC_KEY,
+                checkpoint_manager=manager,
+                global_step=global_step,
+                epoch=epoch,
+            )
+
+            # Generate some text
+            choosen_prompt = random.choice(GENERATION_SAMPLES)
+            input_ids = tokenizer(choosen_prompt, return_tensors="jax", padding=True)[
+                "input_ids"
+            ]
+
+            # Simple greedy generation for monitoring
             try:
-                for sample_prompt in GENERATION_SAMPLES:
-                    inputs = tokenizer(
-                        sample_prompt,
-                        return_tensors="np",
-                        padding=False,
-                        truncation=False,
-                    )
-                    input_ids = jnp.array(inputs["input_ids"])
-
-                    # Simple greedy generation for monitoring
-                    model.eval()
-                    with jax.disable_jit():
-                        for _ in range(min(MAX_NEW_TOKENS, 50)):  # Limit for monitoring
-                            output = model(input_ids)
-                            next_token_logits = output.logits[0, -1, :]
-                            if GREEDY:
-                                next_token = jnp.argmax(next_token_logits)
-                            else:
-                                next_token = jax.random.categorical(
-                                    jax.random.PRNGKey(42),
-                                    next_token_logits / TEMPERATURE,
-                                )
-                            input_ids = jnp.concatenate(
-                                [input_ids, next_token[None, None]], axis=1
+                with jax.disable_jit():
+                    for _ in range(min(MAX_NEW_TOKENS, 50)):  # Limit for monitoring
+                        output = model(input_ids)
+                        next_token_logits = output.logits[0, -1, :]
+                        if GREEDY:
+                            next_token = jnp.argmax(next_token_logits)
+                        else:
+                            next_token = jax.random.categorical(
+                                jax.random.PRNGKey(42 + epoch),
+                                next_token_logits / TEMPERATURE,
                             )
+                        input_ids = jnp.concatenate(
+                            [input_ids, next_token[None, None]], axis=1
+                        )
 
-                            # Stop if EOS token
-                            if next_token == tokenizer.eos_token_id:
-                                break
+                        # Stop if EOS token
+                        if next_token == tokenizer.eos_token_id:
+                            break
 
-                    generated_text = tokenizer.decode(
-                        input_ids[0], skip_special_tokens=True
-                    )
-                    logger.info(f"Generated: {generated_text}")
-                    model.train()
-
+                generated_text = tokenizer.decode(
+                    input_ids[0], skip_special_tokens=True
+                )
+                tb_logger.writer.text(
+                    "train/generation", generated_text, step=global_step
+                )
+                logger.info(f"Generated: {generated_text}")
             except Exception as e:
                 logger.warning(f"Text generation failed: {e}")
 
-        # Calculate epoch duration
+        else:
+            logger.warning(
+                f"No evaluation data processed for epoch {epoch + 1}. Eval loader might be empty or misconfigured."
+            )
+
+        # Record evaluation duration and log to TensorBoard
+        eval_end_time = time.perf_counter()
+        eval_duration = eval_end_time - eval_start_time
+        tb_logger.log_scalar("timing/eval_duration", eval_duration, global_step)
+        logger.info(f"Evaluation completed in {eval_duration:.2f} seconds")
+
+        # Record epoch duration and log to TensorBoard
         epoch_end_time = time.perf_counter()
         epoch_duration = epoch_end_time - epoch_start_time
         epoch_durations.append(epoch_duration)
-
-        tb_logger.log_scalar("timing/epoch_duration", epoch_duration, epoch + 1)
-
+        tb_logger.log_scalar("timing/epoch_duration", epoch_duration, global_step)
         logger.info(f"Epoch {epoch + 1} completed in {epoch_duration:.2f} seconds")
 
     logger.info("Training completed.")
 
     # Log final training metrics
     if train_metrics is not None:
-        final_train_metrics = train_metrics.compute()
-        for metric_name, metric_value in final_train_metrics.items():
-            tb_logger.log_scalar(
-                f"final/train_{metric_name}",
-                metric_value.item(),
-                global_step,
-            )
+        try:
+            final_computed_metrics = train_metrics.compute()
+            if final_computed_metrics and any(
+                v.item() != 0 for v in final_computed_metrics.values()
+            ):
+                logger.info(
+                    "Logging final training metrics from last accumulation cycle..."
+                )
 
-        # Log final auxiliary loss breakdown
-        logger.info("Final Training Metrics:")
-        logger.info(f"  Total Loss: {final_train_metrics['loss']:.6f}")
-        logger.info(f"  CE Loss: {final_train_metrics['ce_loss']:.6f}")
-        logger.info(f"  Z Loss: {final_train_metrics['z_loss']:.6f}")
-        logger.info(
-            f"  Load Balancing Loss: {final_train_metrics['load_balancing_loss']:.6f}"
-        )
-        logger.info(f"  D Loss: {final_train_metrics['d_loss']:.6f}")
-        logger.info(f"  Group Loss: {final_train_metrics['group_loss']:.6f}")
-        logger.info(f"  Perplexity: {final_train_metrics['perplexity']:.4f}")
+                key_metric = "loss"
+                if key_metric in final_computed_metrics:
+                    latest_eval_metrics_for_ckpt = {
+                        BEST_METRIC_KEY: float(final_computed_metrics[key_metric])
+                    }
+
+                # Log final metrics to TensorBoard
+                for metric, value in final_computed_metrics.items():
+                    tb_logger.log_scalar(f"train/{metric}", value, global_step)
+
+                current_lr = cosine_schedule(global_optimizer_step)
+                tb_logger.log_learning_rate(current_lr, global_optimizer_step)
+                logger.info(f"Final learning rate: {current_lr:.2e}")
+
+                # Log final auxiliary loss breakdown
+                logger.info("Final Training Metrics:")
+                logger.info(f"  Total Loss: {final_computed_metrics['loss']:.6f}")
+                logger.info(f"  CE Loss: {final_computed_metrics['ce_loss']:.6f}")
+                logger.info(f"  Z Loss: {final_computed_metrics['z_loss']:.6f}")
+                logger.info(
+                    f"  Load Balancing Loss: {final_computed_metrics['load_balancing_loss']:.6f}"
+                )
+                logger.info(f"  D Loss: {final_computed_metrics['d_loss']:.6f}")
+                logger.info(f"  Group Loss: {final_computed_metrics['group_loss']:.6f}")
+                logger.info(f"  Perplexity: {final_computed_metrics['perplexity']:.4f}")
+        except Exception as e:
+            logger.warning(f"Could not compute final training metrics: {e}")
 
     # Calculate total training duration and log to TensorBoard
     training_end_time = time.perf_counter()
@@ -713,7 +780,14 @@ def main(cfg: DictConfig):
     artifacts_dir = Path(args.output_dir)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save training history
+    # Copy TensorBoard logs to artifacts directory
+    tb_logs_source = Path(args.logging_dir) / "training"
+    tb_logs_target = artifacts_dir / "tensorboard_logs"
+    if tb_logs_source.exists():
+        shutil.copytree(tb_logs_source, tb_logs_target, dirs_exist_ok=True)
+        logger.info(f"TensorBoard logs copied to {tb_logs_target}")
+
+    # Save training history (keeping minimal data for compatibility)
     training_summary = {
         "total_training_duration": total_training_duration,
         "avg_epoch_duration": avg_epoch_duration,
@@ -744,7 +818,7 @@ def main(cfg: DictConfig):
         json.dump(trainer_config_dict, f, indent=4)
     logger.info(f"Trainer config saved to {artifacts_dir / 'trainer_config.json'}")
 
-    # Save tokenizer
+    # Saving the tokenizer
     tokenizer.save_pretrained(artifacts_dir)
 
     # Save timing summary
@@ -753,7 +827,7 @@ def main(cfg: DictConfig):
         "total_training_duration_hours": total_training_duration / 3600,
         "average_epoch_duration_seconds": avg_epoch_duration,
         "num_epochs_completed": len(epoch_durations),
-        "num_evaluations_completed": len(epoch_durations),
+        "num_evaluations_completed": len(epoch_durations),  # One eval per epoch
     }
     with open(artifacts_dir / "timing_summary.json", "w") as f:
         json.dump(timing_summary, f, indent=4)
@@ -761,52 +835,83 @@ def main(cfg: DictConfig):
 
     # Save final model state
     if global_step > 0:
-        state = nnx.state(model, nnx.Param)
+        final_model_state = nnx.state(model, nnx.Param)
+        logger.info(
+            f"Saving final model state at step {global_step} to be considered by CheckpointManager with metrics {latest_eval_metrics_for_ckpt}."
+        )
+
         manager.save(
             global_step,
-            args=ocp.args.PyTreeSave(state),
+            final_model_state,
             metrics=latest_eval_metrics_for_ckpt,
         )
+        manager.wait_until_finished()
 
     # Copy best checkpoint to artifacts directory
     best_step_to_deploy = manager.best_step()
     target_ckpt_deployment_path = artifacts_dir / "model_checkpoint"
 
     if best_step_to_deploy is not None:
-        best_ckpt_path = ckpt_dir / str(best_step_to_deploy)
-        import shutil
-
-        shutil.copytree(best_ckpt_path, target_ckpt_deployment_path, dirs_exist_ok=True)
         logger.info(
-            f"Best checkpoint (step {best_step_to_deploy}) copied to {target_ckpt_deployment_path}"
+            f"Best checkpoint according to CheckpointManager is at step {best_step_to_deploy} (based on {BEST_METRIC_KEY})."
         )
+        source_ckpt_dir = manager.directory / str(best_step_to_deploy)
+
+        if source_ckpt_dir.exists():
+            logger.info(
+                f"Copying best checkpoint from {source_ckpt_dir} to {target_ckpt_deployment_path}"
+            )
+            if target_ckpt_deployment_path.exists():
+                shutil.rmtree(target_ckpt_deployment_path)
+
+            target_ckpt_deployment_path.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(
+                source_ckpt_dir, target_ckpt_deployment_path, dirs_exist_ok=True
+            )
+        else:
+            logger.error(f"Best checkpoint directory {source_ckpt_dir} not found.")
     else:
-        logger.warning("No best checkpoint found. Saving current model state.")
-        manager.save(
-            global_step,
-            items=nnx.state(model),
-            metrics=latest_eval_metrics_for_ckpt,
-        )
+        logger.warning("CheckpointManager did not identify a best checkpoint.")
+        if global_step > 0:
+            final_model_state = nnx.state(model, nnx.Param)
+            logger.info(
+                f"Saving current final model state directly to {target_ckpt_deployment_path} as a fallback."
+            )
+            if target_ckpt_deployment_path.exists():
+                shutil.rmtree(target_ckpt_deployment_path)
+            target_ckpt_deployment_path.mkdir(parents=True, exist_ok=True)
+            ocp.PyTreeCheckpointHandler().save(
+                target_ckpt_deployment_path,
+                final_model_state,
+            )
+        else:
+            logger.error(
+                "No optimizer steps were completed, and no best checkpoint found. Cannot save a model."
+            )
 
     # Push to Hub if requested
     if args.push_to_hub:
-        logger.info("Uploading to Hugging Face Hub...")
-        repo_id = args.hub_model_id
-
-        if not repo_exists(repo_id, token=args.hub_token):
+        logger.info(
+            f"Pushing artifacts from {artifacts_dir} to Hugging Face Hub repository: {args.hub_model_id}..."
+        )
+        if not repo_exists(args.hub_model_id, token=args.hub_token):
+            logger.info(f"Creating repository {args.hub_model_id}...")
             create_repo(
-                repo_id,
-                private=args.hub_private_repo,
+                repo_id=args.hub_model_id,
                 token=args.hub_token,
+                private=args.hub_private_repo,
+                exist_ok=True,
             )
 
         upload_folder(
+            repo_id=args.hub_model_id,
             folder_path=artifacts_dir,
-            repo_id=repo_id,
             token=args.hub_token,
-            commit_message=f"Training completed - {global_step} steps",
+            commit_message=cfg.get(
+                "upload_message", "MoxE language model training completed"
+            ),
         )
-        logger.info(f"Model uploaded to {repo_id}")
+        logger.info("Push to Hub completed.")
 
 
 if __name__ == "__main__":
