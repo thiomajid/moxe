@@ -161,21 +161,21 @@ class xLSTMBlockStack(nnx.Module):
 
         return blocks
 
-    def __call__(self, x: jax.Array) -> jax.Array:
+    def __call__(self, x: jax.Array):
         """Process input through all blocks in sequence (forward pass).
 
         Args:
             x: Input tensor of shape [B, S, D]
 
         Returns:
-            Processed output tensor of shape [B, S, D]
+            Processed output tensor of shape [B, S, D] and hidden states per block
         """
 
         def _block_scan(carry: jax.Array, block_idx: int):
-            new_state = jax.lax.switch(block_idx, self.blocks, carry)
-            return new_state, None
+            new_state: jax.Array = jax.lax.switch(block_idx, self.blocks, carry)
+            return new_state, new_state
 
-        x, _ = jax.lax.scan(f=_block_scan, init=x, xs=jnp.arange(len(self.blocks)))
-        x = self.post_blocks_norm(x)
+        x_t, h_t = jax.lax.scan(f=_block_scan, init=x, xs=jnp.arange(len(self.blocks)))
+        x_t = self.post_blocks_norm(x_t)
 
-        return x
+        return x_t, h_t

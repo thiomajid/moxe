@@ -96,7 +96,7 @@ class xLSTMLMModel(nnx.Module):
         self.tie_weights = config.tie_weights
         self.pad_token_id = config.pad_token_id
 
-    def __call__(self, input_ids: jax.Array, training: bool = False):
+    def __call__(self, input_ids: jax.Array):
         """Forward pass through the model.
 
         Args:
@@ -107,25 +107,24 @@ class xLSTMLMModel(nnx.Module):
         """
 
         # Get embedding weights (either shared or dedicated)
-        embeddings = None
+        h_t = None
         if self.tie_weights:
             emb_weight = self.shared_weight
-            embeddings = jnp.take(emb_weight, input_ids, axis=0)
+            h_t = jnp.take(emb_weight, input_ids, axis=0)
         else:
-            embeddings = self.token_embedding(input_ids)
+            h_t = self.token_embedding(input_ids)
 
         padding_mask = create_padding_mask(input_ids, self.pad_token_id)
-        embeddings = apply_padding_mask_with_gradient_stop(embeddings, padding_mask)
+        h_t = apply_padding_mask_with_gradient_stop(h_t, padding_mask)
 
-        hidden_states = self.embedding_dropout(embeddings)
-
-        hidden_states = self.xlstm_block_stack(hidden_states)
+        h_t = self.embedding_dropout(h_t)
+        h_t, _ = self.xlstm_block_stack(h_t)
 
         # Apply language model head
         logits = None
         if self.tie_weights:
-            logits = jnp.matmul(hidden_states, self.shared_weight.T)
+            logits = jnp.matmul(h_t, self.shared_weight.T)
         else:
-            logits = self.lm_head(hidden_states)
+            logits = self.lm_head(h_t)
 
         return logits

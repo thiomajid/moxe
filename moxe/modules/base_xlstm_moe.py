@@ -28,7 +28,7 @@ class xLSTMMoELayer(nnx.Module):
 
     # code adapted from transformers.models.mixtral.modeling_mixtral.py
     def __call__(self, h_t: jax.Array, *args):
-        h_t = self.sequence_mixer(h_t)
+        h_t, _ = self.sequence_mixer(h_t)
 
         B, S, D = h_t.shape
 

@@ -1,9 +1,9 @@
 # MoE specific arguments
 monitored_layers: "all"
-z_loss_coef: 0.0
-load_balancing_loss_coef: 0.0
-d_loss_coef: 0.0
-group_loss_coef: 0.0
+z_loss_coef: 0.001
+load_balancing_loss_coef: 0.01
+d_loss_coef: 0.01
+group_loss_coef: 0.01
 
 # Experiment conditioning
 return_layers_outputs: true

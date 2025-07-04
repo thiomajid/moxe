@@ -154,10 +154,9 @@ def checkpoint_post_eval(
     logger.info(f"Epoch {epoch + 1} Evaluation Results: {eval_log_data}")
 
     # Update metrics for checkpointing and save checkpoint
-    key_metric = "loss"
-    if key_metric in computed_eval_metrics:
+    if best_metric_key in computed_eval_metrics:
         latest_eval_metrics_for_ckpt = {
-            best_metric_key: float(computed_eval_metrics[key_metric])
+            best_metric_key: float(computed_eval_metrics[best_metric_key])
         }
 
         logger.info(
@@ -174,5 +173,5 @@ def checkpoint_post_eval(
         logger.info(f"Checkpoint saved at end of epoch {epoch + 1}")
     else:
         logger.warning(
-            f"Key metric '{key_metric}' not found in eval metrics, skipping checkpoint save"
+            f"Key metric '{best_metric_key}' not found in eval metrics, skipping checkpoint save"
         )

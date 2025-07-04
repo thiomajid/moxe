@@ -141,7 +141,6 @@ class MoxECausalLMOutput:
 
 @struct.dataclass
 class MoxEForwardPassOutput:
-    model: MoxECausalLMOutput
     ce_loss: jax.Array
     z_loss: jax.Array
     load_balance_loss: jax.Array

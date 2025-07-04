@@ -56,8 +56,9 @@ class MoxEModel(nnx.Module):
     def __call__(
         self,
         input_ids: jax.Array,
-        compute_d_loss: bool = True,
-        compute_group_loss: bool = True,
+        compute_d_loss: bool = False,
+        compute_group_loss: bool = False,
+        return_layers_outputs: bool = False,
     ):
         h_t = self.token_embedding(input_ids)
         padding_mask = create_padding_mask(input_ids, self.pad_token_id)
@@ -101,13 +102,9 @@ class MoxEModel(nnx.Module):
         for layer in self.layers:
             out = layer(h_t, compute_d_loss, compute_group_loss)
             h_t = out.hidden_states if self.moe_layer_type == MoELayerType.MoxE else out
-            # h_t = jax.lax.cond(
-            #     self.moe_layer_type == MoELayerType.MoxE,
-            #     lambda: getattr(out, "hidden_states", out),
-            #     lambda: out,
-            # )
 
-            layers_outputs = layers_outputs + (out,)
+            if return_layers_outputs:
+                layers_outputs = layers_outputs + (out,)
 
         return MoxEModelOutput(layers_outputs=layers_outputs, hidden_states=h_t)
 
@@ -155,13 +152,15 @@ class MoxEForCausalLM(nnx.Module):
         self,
         input_ids: jax.Array,
         output_hidden_states: bool = False,
-        compute_d_loss: bool = True,
-        compute_group_loss: bool = True,
+        compute_d_loss: bool = False,
+        compute_group_loss: bool = False,
+        return_layers_outputs: bool = False,
     ):
         moe_out = self.moe(
             input_ids,
             compute_d_loss=compute_d_loss,
             compute_group_loss=compute_group_loss,
+            return_layers_outputs=return_layers_outputs,
         )
 
         h_t = moe_out.hidden_states
