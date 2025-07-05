@@ -52,11 +52,14 @@ def parallel_stabilized_simple(
 
     # forget gate matrix
     log_fgates = jax.nn.log_sigmoid(fgate_preact)  # (B, NH, S, 1)
-    ltr = lax.cond(
-        lower_triangular_matrix is None or S != lower_triangular_matrix.shape[0],
-        lambda: jnp.tril(jnp.ones((S, S), dtype=jnp.bool)),
-        lambda: lower_triangular_matrix,
-    )
+    # ltr = lax.cond(
+    #     lower_triangular_matrix is None or S != lower_triangular_matrix.shape[0],
+    #     lambda: jnp.tril(jnp.ones((S, S), dtype=jnp.bool)),
+    #     lambda: lower_triangular_matrix,
+    # )
+
+    # it is always built from the cell's causal mask
+    ltr = lower_triangular_matrix
 
     # Calculate cumulative sum of log forget gates
     log_fgates_cumsum = jnp.concatenate(

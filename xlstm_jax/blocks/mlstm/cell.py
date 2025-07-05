@@ -99,7 +99,10 @@ class mLSTMCell(nnx.Module):
 
         self.causal_mask = nnx.Variable(
             jnp.tril(
-                jnp.ones((config.context_length, config.context_length), dtype=jnp.bool)
+                jnp.ones(
+                    (config.context_length, config.context_length),
+                    dtype=jnp.bool,
+                )
             )
         )
 

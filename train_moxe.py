@@ -552,6 +552,7 @@ def main(cfg: DictConfig):
     TEMPERATURE = 0.85
 
     for epoch in range(args.num_train_epochs):
+        model.train()
         epoch_start_time = time.perf_counter()
         logger.info(f"Starting Epoch {epoch + 1}/{args.num_train_epochs}")
         train_metrics.reset()
@@ -639,6 +640,7 @@ def main(cfg: DictConfig):
                 pbar.update(1)
 
         # --- Evaluation after each epoch ---
+        model.eval()
         eval_start_time = time.perf_counter()
         logger.info(f"Starting evaluation after epoch {epoch + 1}...")
         eval_metrics.reset()
