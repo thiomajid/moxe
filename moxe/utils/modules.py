@@ -147,15 +147,10 @@ def checkpoint_post_eval(
     for metric, value in computed_eval_metrics.items():
         tb_logger.log_scalar(f"eval/{metric}", value, global_step)
 
-        # Log evaluation results
-    eval_log_data = {
-        f"eval_{k}": f"{v.item():.6f}" for k, v in computed_eval_metrics.items()
-    }
-    logger.info(f"Epoch {epoch + 1} Evaluation Results: {eval_log_data}")
-
     # Update metrics for checkpointing and save checkpoint
+    which_metric = best_metric_key.split("_")[-1]
     latest_eval_metrics_for_ckpt = {
-        best_metric_key: float(computed_eval_metrics[best_metric_key])
+        best_metric_key: float(computed_eval_metrics[which_metric])
     }
 
     logger.info(
