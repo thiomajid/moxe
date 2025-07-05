@@ -27,7 +27,7 @@ def _generation_step_body(
 
     # --- Input Preparation ---
     input_sequence = current_full_x
-    out = model(input_sequence)  # Shape: [batch, seq_len, vocab_size]
+    out = model.generate(input_sequence)  # Shape: [batch, seq_len, vocab_size]
     batch_size = current_full_x.shape[0]  # Get batch size dynamically
 
     # --- Logit Selection ---

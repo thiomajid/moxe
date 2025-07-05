@@ -82,7 +82,6 @@ def main(cfg: DictConfig):
     total_length = initial_len + MAX_NEW_TOKENS
     full_x_init = jnp.zeros((batch_size, total_length), dtype=jnp.int32)
     full_x_init = full_x_init.at[:, :initial_len].set(input_ids)
-    # full_x_init = jax.device_put(full_x_init, DATA_SHARDING)
     key = jax.random.key(123)
     initial_carry: GenerationCarry = (
         full_x_init,
@@ -103,7 +102,7 @@ def main(cfg: DictConfig):
     print(sequences)
 
     _ = generate_sequence_scan(
-        jitted_model,
+        model,
         initial_carry,
         max_new_tokens=MAX_NEW_TOKENS,
         vocab_size=config.xlstm.vocab_size,

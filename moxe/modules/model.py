@@ -172,3 +172,7 @@ class MoxEForCausalLM(nnx.Module):
             hidden_states=h_t if output_hidden_states else None,
             layers_outputs=moe_out.layers_outputs,
         )
+
+    def generate(self, input_ids: jax.Array):
+        output = self(input_ids)
+        return output.logits

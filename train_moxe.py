@@ -547,7 +547,7 @@ def main(cfg: DictConfig):
     )
 
     GENERATION_SAMPLES = ["Once upon a time", "There was a girl", "Next to the tree"]
-    MAX_NEW_TOKENS = 300
+    MAX_NEW_TOKENS = 100
     GREEDY = False
     TEMPERATURE = 0.85
 

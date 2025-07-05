@@ -15,7 +15,7 @@ group_wise_loss: "kl_div"
 xlstm:
   pad_token_id: 1
   vocab_size: 48
-  context_length: 10
+  context_length: 128
   num_blocks: 1
   embedding_dim: 32
   # slstm_at: [1]
