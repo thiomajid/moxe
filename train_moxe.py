@@ -65,6 +65,19 @@ def _accumulate_loss(
     return loss
 
 
+def _get_loss(output: MoxELayerOutput | ConditionedGateOutput, attr: str) -> jax.Array:
+    return getattr(output, attr)
+
+
+def _vmapped_loss_accumulator(
+    outputs: tp.List[MoxELayerOutput | ConditionedGateOutput], attr: str
+):
+    fn = jax.vmap(_get_loss, in_axes=(0, None))
+    loss = fn(outputs, attr).mean()
+
+    return loss
+
+
 def loss_fn(
     model: MoxEForCausalLM,
     batch: tuple[jax.Array, jax.Array],
@@ -99,24 +112,10 @@ def loss_fn(
     layers_outputs = output.layers_outputs
 
     # z-loss
-    per_layer_z_loss = jtu.tree_map(f=lambda layer: layer.z_loss, tree=layers_outputs)
-    z_loss = jtu.tree_reduce(
-        jnp.add,
-        tree=per_layer_z_loss,
-        initializer=jnp.zeros((), dtype=total_loss.dtype),
-    ).mean()
-
-    # load-balancing
-    per_layer_load_balancing_loss = jtu.tree_map(
-        f=lambda layer: layer.load_balancing_loss,
-        tree=layers_outputs,
+    z_loss = _vmapped_loss_accumulator(layers_outputs, "z_loss")
+    load_balancing_loss = _vmapped_loss_accumulator(
+        layers_outputs, "load_balancing_loss_coef"
     )
-
-    load_balancing_loss = jtu.tree_reduce(
-        jnp.add,
-        tree=per_layer_load_balancing_loss,
-        initializer=jnp.zeros((), dtype=total_loss.dtype),
-    ).mean()
 
     # d-loss
     d_loss = jnp.zeros((), dtype=total_loss.dtype)
