@@ -354,6 +354,8 @@ def main(cfg: DictConfig):
         )
 
     logger.info(f"Model parameters: {count_parameters(model)}")
+    logger.info(f"Embedding size {count_parameters(model.moe.embedding_dropout)}")
+    logger.info(f"MoE layer size {count_parameters(model.moe.layers[0])}")
 
     log_node_devices_stats(logger)
 
