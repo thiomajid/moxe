@@ -18,7 +18,6 @@ import orbax.checkpoint as ocp
 from einops import rearrange
 from flax import nnx
 from huggingface_hub import create_repo, repo_exists, snapshot_download, upload_folder
-from jax import lax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
@@ -32,7 +31,7 @@ from moxe.config import MoxEConfig
 
 # from moxe.inference import GenerationCarry, generate_sequence_scan  # Unused imports
 from moxe.modules.model import MoxEForCausalLM
-from moxe.output import ConditionedGateOutput, MoxELayerOutput
+from moxe.output import ConditionedGateOutput, MoxEForwardPassOutput, MoxELayerOutput
 from moxe.tensorboard import TensorBoardLogger
 from moxe.training.arguments import CustomArgs
 from moxe.training.data import DataCollatatorTransform, create_dataloaders
@@ -96,30 +95,62 @@ def loss_fn(
 
     total_loss = ce_loss
 
-    # Initialize auxiliary losses with zeros
-    z_loss = _accumulate_loss(output.layers_outputs, "z_loss")
-    load_balancing_loss = _accumulate_loss(output.layers_outputs, "load_balancing_loss")
+    # Collect auxiliary losses
+    layers_outputs = output.layers_outputs
 
-    d_loss = lax.cond(
-        d_loss_coef > 0.0,
-        lambda: _accumulate_loss(
-            output.layers_outputs,
-            "d_loss",
-            is_leaf=lambda node: isinstance(node, ConditionedGateOutput),
-        ),
-        lambda: jnp.zeros((), dtype=total_loss.dtype),
+    # z-loss
+    per_layer_z_loss = jtu.tree_map(f=lambda layer: layer.z_loss, tree=layers_outputs)
+    z_loss = jtu.tree_reduce(
+        jnp.add,
+        tree=per_layer_z_loss,
+        initializer=jnp.zeros((), dtype=total_loss.dtype),
+    ).mean()
+
+    # load-balancing
+    per_layer_load_balancing_loss = jtu.tree_map(
+        f=lambda layer: layer.load_balancing_loss,
+        tree=layers_outputs,
     )
 
-    group_loss = lax.cond(
-        group_loss_coef > 0.0,
-        lambda: _accumulate_loss(
-            output.layers_outputs,
-            "group_loss",
-            is_leaf=lambda node: isinstance(node, ConditionedGateOutput),
-        ),
-        lambda: jnp.zeros((), dtype=total_loss.dtype),
-    )
+    load_balancing_loss = jtu.tree_reduce(
+        jnp.add,
+        tree=per_layer_load_balancing_loss,
+        initializer=jnp.zeros((), dtype=total_loss.dtype),
+    ).mean()
 
+    # d-loss
+    d_loss = jnp.zeros((), dtype=total_loss.dtype)
+    if d_loss_coef > 0.0:
+        per_layer_d_loss = jtu.tree_map(
+            f=lambda gate_out: gate_out.d_loss,
+            tree=layers_outputs,
+            is_leaf=lambda node: node is not None
+            and isinstance(node, ConditionedGateOutput),
+        )
+
+        d_loss = jtu.tree_reduce(
+            jnp.add,
+            tree=per_layer_d_loss,
+            initializer=d_loss,
+        ).mean()
+
+    # group-loss
+    group_loss = jnp.zeros((), dtype=total_loss.dtype)
+    if group_loss_coef > 0.0:
+        per_layer_group_loss = jtu.tree_map(
+            f=lambda gate_out: gate_out.group_loss,
+            tree=layers_outputs,
+            is_leaf=lambda node: node is not None
+            and isinstance(node, ConditionedGateOutput),
+        )
+
+        group_loss = jtu.tree_reduce(
+            jnp.add,
+            tree=per_layer_group_loss,
+            initializer=group_loss,
+        ).mean()
+
+    # finalize
     total_loss = (
         total_loss
         + z_loss_coef * z_loss
@@ -128,13 +159,15 @@ def loss_fn(
         + group_loss * group_loss_coef
     )
 
-    return total_loss, {
-        "ce_loss": ce_loss,
-        "z_loss": z_loss,
-        "load_balancing_loss": load_balancing_loss,
-        "d_loss": d_loss,
-        "group_loss": group_loss,
-    }
+    aux_data = MoxEForwardPassOutput(
+        ce_loss=ce_loss,
+        z_loss=z_loss,
+        load_balancing_loss=load_balancing_loss,
+        d_loss=d_loss,
+        group_loss=group_loss,
+    )
+
+    return total_loss, aux_data
 
 
 @functools.partial(
@@ -171,18 +204,18 @@ def compute_grads_and_metrics(
     grad_fn = nnx.value_and_grad(_loss_fn, has_aux=True)
     (loss, aux_losses), grads = grad_fn(model, batch)
 
-    perplexity = jnp.exp(aux_losses["ce_loss"])
+    perplexity = jnp.exp(aux_losses.ce_loss)
     grad_norm = optax.global_norm(grads)
 
     metrics.update(
         loss=loss,
         perplexity=perplexity,
         grad_norm=grad_norm,
-        ce_loss=aux_losses["ce_loss"],
-        z_loss=aux_losses["z_loss"],
-        load_balancing_loss=aux_losses["load_balancing_loss"],
-        d_loss=aux_losses["d_loss"],
-        group_loss=aux_losses["group_loss"],
+        ce_loss=aux_losses.ce_loss,
+        z_loss=aux_losses.z_loss,
+        load_balancing_loss=aux_losses.load_balancing_loss,
+        d_loss=aux_losses.d_loss,
+        group_loss=aux_losses.group_loss,
     )
 
     return loss, grads, grad_norm
@@ -216,16 +249,16 @@ def eval_step(
         group_loss_coef,
     )
 
-    perplexity = jnp.exp(aux_losses["ce_loss"])
+    perplexity = jnp.exp(aux_losses.ce_loss)
 
     metrics.update(
         loss=total_loss,
         perplexity=perplexity,
-        ce_loss=aux_losses["ce_loss"],
-        z_loss=aux_losses["z_loss"],
-        load_balancing_loss=aux_losses["load_balancing_loss"],
-        d_loss=aux_losses["d_loss"],
-        group_loss=aux_losses["group_loss"],
+        ce_loss=aux_losses.ce_loss,
+        z_loss=aux_losses.z_loss,
+        load_balancing_loss=aux_losses.load_balancing_loss,
+        d_loss=aux_losses.d_loss,
+        group_loss=aux_losses.group_loss,
     )
 
 

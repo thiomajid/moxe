@@ -59,7 +59,6 @@ def parallel_stabilized_simple(
     )
 
     # Calculate cumulative sum of log forget gates
-
     log_fgates_cumsum = jnp.concatenate(
         [
             jnp.zeros((B, NH, 1, 1), dtype=_dtype),

@@ -143,6 +143,6 @@ class MoxECausalLMOutput:
 class MoxEForwardPassOutput:
     ce_loss: jax.Array
     z_loss: jax.Array
-    load_balance_loss: jax.Array
+    load_balancing_loss: jax.Array
     d_loss: jax.Array
     group_loss: jax.Array
