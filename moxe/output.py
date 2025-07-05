@@ -95,12 +95,8 @@ class ConditionedGateOutput:
     probabilities: jax.Array
     bias: jax.Array
     d_t: jax.Array
-    z_loss: jax.Array
-    load_balancing_loss: jax.Array
     router_entropy: jax.Array
     predicted_entropy: jax.Array
-    expert_load: jax.Array
-    expert_token_counts: jax.Array
     d_loss: jax.Array
     group_loss: jax.Array
 

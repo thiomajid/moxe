@@ -7,10 +7,8 @@ from jax.sharding import Mesh
 
 from ..config import MoxEConfig
 from ..ops import (
-    auxiliary_load_balancing_loss,
     compute_entropy,
     kl_auxiliary_group_loss,
-    router_z_loss,
 )
 from ..output import ConditionedGateOutput, str2modulation_bias
 
@@ -164,16 +162,6 @@ class BiasConditionedGate(nnx.Module):
         conditioned_logits = unbiased_logits + flat_bias
         router_probs = jax.nn.softmax(conditioned_logits, axis=-1)
 
-        # -------------- Z-loss and load_balancing_loss ----------------
-        z_loss = router_z_loss(unbiased_logits)
-        load_balancing_loss, expert_load, expert_token_counts = (
-            auxiliary_load_balancing_loss(
-                num_experts=self.num_experts,
-                router_probs=router_probs,
-                top_k=self.top_k,
-            )
-        )
-
         # ------------------- d_loss computation -----------------------
         d_loss, router_entropy, predicted_entropy = lax.cond(
             compute_d_loss,
@@ -199,12 +187,8 @@ class BiasConditionedGate(nnx.Module):
             probabilities=router_probs,
             bias=bias,
             d_t=d_t,
-            z_loss=z_loss,
-            load_balancing_loss=load_balancing_loss,
             router_entropy=router_entropy,
             predicted_entropy=predicted_entropy,
-            expert_load=expert_load,
-            expert_token_counts=expert_token_counts,
             d_loss=d_loss,
             group_loss=group_loss,
         )

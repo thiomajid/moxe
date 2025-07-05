@@ -149,25 +149,15 @@ class MoxELayer(nnx.Module):
         final_outputs = jnp.sum(expert_outputs, axis=0)  # (B*S, D)
         final_hidden_states = final_outputs.reshape(B, S, D)
 
-        # --- Rest of the function remains the same ---
-        z_loss = lax.cond(
-            self.router_type == SparsityGateType.STANDARD,
-            lambda: router_z_loss(gate_logits),
-            lambda: gate_output.z_loss,
-        )
+        # ---------------- Auxiliary lossess ---------------------------
+        z_loss = router_z_loss(gate_logits)
 
-        load_balancing_loss, expert_load, expert_token_counts = lax.cond(
-            self.router_type == SparsityGateType.STANDARD,
-            lambda: auxiliary_load_balancing_loss(
+        load_balancing_loss, expert_load, expert_token_counts = (
+            auxiliary_load_balancing_loss(
                 num_experts=self.num_experts,
                 router_probs=router_probs,
                 top_k=self.top_k,
-            ),
-            lambda: (
-                gate_output.load_balancing_loss,
-                gate_output.expert_load,
-                gate_output.expert_token_counts,
-            ),
+            )
         )
 
         return MoxELayerOutput(

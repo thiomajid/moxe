@@ -57,29 +57,14 @@ def _accumulate_loss(
     in a way that is compatible with JAX tracing.
     """
 
-    def _get_loss_leaf(path, leaf):
-        # The leaf could be None from an Optional field, return a scalar zero.
-        if leaf is None:
-            return 0.0
-
-        # Check if the final part of the path is a GetAttrKey with the desired attribute name.
-        # path is a tuple like (TupleKey(0), GetAttrKey('conditioned_output'), GetAttrKey('d_loss'))
-        if path and isinstance(path[-1], jtu.GetAttrKey) and path[-1].name == attr:
-            return leaf
-        else:
-            # if the current leaf is not what I am looking for, simply return 0 so that jnp.add won't
-            # yield a broadcasting error
-            return 0.0
-
-    # Create a new tree containing only the target losses and zeros everywhere else.
-    loss_tree = jtu.tree_map_with_path(f=_get_loss_leaf, tree=outputs, is_leaf=is_leaf)
-
-    # Sum all leaves in the newly created, filtered tree.
-    total_loss = jtu.tree_reduce(
-        jnp.add,
-        tree=loss_tree,
-        initializer=jnp.zeros(()),
-    )
+    leaves_with_paths = jtu.tree_leaves_with_path(outputs)
+    total_loss = jnp.array(
+        [
+            leaf
+            for path, leaf in leaves_with_paths
+            if isinstance(path[-1], jtu.GetAttrKey) and path[-1].name == attr
+        ]
+    ).sum()
 
     return total_loss
 
@@ -128,12 +113,7 @@ def loss_fn(
     # d-loss
     d_loss: jax.Array = jax.lax.cond(
         d_loss_coef > 0.0,
-        lambda: _accumulate_loss(
-            layers_outputs,
-            "d_loss",
-            is_leaf=lambda node: node is not None
-            and isinstance(node, ConditionedGateOutput),
-        ).astype(_dtype),
+        lambda: _accumulate_loss(layers_outputs, "d_loss").astype(_dtype),
         lambda: jnp.zeros((), dtype=_dtype),
     )
 
@@ -142,12 +122,7 @@ def loss_fn(
     # group-loss
     group_loss: jax.Array = jax.lax.cond(
         group_loss_coef > 0.0,
-        lambda: _accumulate_loss(
-            layers_outputs,
-            "group_loss",
-            is_leaf=lambda node: node is not None
-            and isinstance(node, ConditionedGateOutput),
-        ).astype(_dtype),
+        lambda: _accumulate_loss(layers_outputs, "group_loss").astype(_dtype),
         lambda: jnp.zeros((), dtype=_dtype),
     )
 
@@ -815,7 +790,7 @@ def main(cfg: DictConfig):
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     # Copy TensorBoard logs to artifacts directory
-    tb_logs_source = Path(args.logging_dir) / "training"
+    tb_logs_source = Path(args.logging_dir)
     tb_logs_target = artifacts_dir / "tensorboard_logs"
     if tb_logs_source.exists():
         shutil.copytree(tb_logs_source, tb_logs_target, dirs_exist_ok=True)
