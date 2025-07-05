@@ -50,32 +50,35 @@ def _accumulate_loss(
     attr: str,
     is_leaf: tp.Callable[[tp.Any], bool] = None,
 ):
-    per_layer_loss = jtu.tree_map(
-        f=lambda layer: getattr(layer, attr),
-        tree=outputs,
-        is_leaf=is_leaf,
+    """
+    Accumulates a specific loss attribute from a Pytree of layer outputs
+    in a way that is compatible with JAX tracing.
+    """
+
+    def _get_loss_leaf(path, leaf):
+        # The leaf could be None from an Optional field, return a scalar zero.
+        if leaf is None:
+            return 0.0
+
+        # Check if the final part of the path is a GetAttrKey with the desired attribute name.
+        # path is a tuple like (TupleKey(0), GetAttrKey('conditioned_output'), GetAttrKey('d_loss'))
+        if path and isinstance(path[-1], jtu.GetAttrKey) and path[-1].name == attr:
+            return leaf
+        else:
+            # Return a zero with the same shape and type as the leaf to maintain tree structure.
+            return jtu.tree_map(jnp.zeros_like, leaf)
+
+    # Create a new tree containing only the target losses and zeros everywhere else.
+    loss_tree = jtu.tree_map_with_path(f=_get_loss_leaf, tree=outputs, is_leaf=is_leaf)
+
+    # Sum all leaves in the newly created, filtered tree.
+    total_loss = jtu.tree_reduce(
+        jnp.add,
+        tree=loss_tree,
+        initializer=jnp.zeros(()),
     )
 
-    loss = jtu.tree_reduce(
-        jnp.add,
-        tree=per_layer_loss,
-        initializer=jnp.zeros(()),
-    ).mean()
-
-    return loss
-
-
-def _get_loss(output: MoxELayerOutput | ConditionedGateOutput, attr: str) -> jax.Array:
-    return getattr(output, attr)
-
-
-def _vmapped_loss_accumulator(
-    outputs: tp.List[MoxELayerOutput | ConditionedGateOutput], attr: str
-):
-    fn = jax.vmap(_get_loss, in_axes=(0, None))
-    loss = fn(outputs, attr).mean()
-
-    return loss
+    return total_loss
 
 
 def loss_fn(
@@ -106,48 +109,46 @@ def loss_fn(
         logits=shifted_logits, labels=shifted_labels
     ).mean()
 
+    _dtype = ce_loss.dtype
     total_loss = ce_loss
 
     # Collect auxiliary losses
     layers_outputs = output.layers_outputs
+    num_layers = model.moe.num_layers
 
-    # z-loss
-    z_loss = _vmapped_loss_accumulator(layers_outputs, "z_loss")
-    load_balancing_loss = _vmapped_loss_accumulator(
-        layers_outputs, "load_balancing_loss_coef"
-    )
+    z_loss = _accumulate_loss(layers_outputs, "z_loss")
+    z_loss = (z_loss / num_layers).astype(_dtype)
+
+    load_balancing_loss = _accumulate_loss(layers_outputs, "load_balancing_loss")
+    load_balancing_loss = (load_balancing_loss / num_layers).astype(_dtype)
 
     # d-loss
-    d_loss = jnp.zeros((), dtype=total_loss.dtype)
-    if d_loss_coef > 0.0:
-        per_layer_d_loss = jtu.tree_map(
-            f=lambda gate_out: gate_out.d_loss,
-            tree=layers_outputs,
+    d_loss: jax.Array = jax.lax.cond(
+        d_loss_coef > 0.0,
+        lambda: _accumulate_loss(
+            layers_outputs,
+            "d_loss",
             is_leaf=lambda node: node is not None
             and isinstance(node, ConditionedGateOutput),
-        )
+        ).astype(_dtype),
+        lambda: jnp.zeros((), dtype=_dtype),
+    )
 
-        d_loss = jtu.tree_reduce(
-            jnp.add,
-            tree=per_layer_d_loss,
-            initializer=d_loss,
-        ).mean()
+    d_loss = d_loss / num_layers
 
     # group-loss
-    group_loss = jnp.zeros((), dtype=total_loss.dtype)
-    if group_loss_coef > 0.0:
-        per_layer_group_loss = jtu.tree_map(
-            f=lambda gate_out: gate_out.group_loss,
-            tree=layers_outputs,
+    group_loss: jax.Array = jax.lax.cond(
+        group_loss_coef > 0.0,
+        lambda: _accumulate_loss(
+            layers_outputs,
+            "group_loss",
             is_leaf=lambda node: node is not None
             and isinstance(node, ConditionedGateOutput),
-        )
+        ).astype(_dtype),
+        lambda: jnp.zeros((), dtype=_dtype),
+    )
 
-        group_loss = jtu.tree_reduce(
-            jnp.add,
-            tree=per_layer_group_loss,
-            initializer=group_loss,
-        ).mean()
+    group_loss = group_loss / num_layers
 
     # finalize
     total_loss = (
