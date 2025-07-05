@@ -1,4 +1,4 @@
-num_experts: 8
+num_experts: 4
 top_k_experts: 2
 num_layers: 2
 moe_layer_type: "moxe"
