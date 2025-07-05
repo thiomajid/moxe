@@ -31,6 +31,7 @@ from transformers import (
 from moxe.config import MoxEConfig
 
 # from moxe.inference import GenerationCarry, generate_sequence_scan  # Unused imports
+from moxe.inference import GenerationCarry, generate_sequence_scan
 from moxe.modules.model import MoxEForCausalLM
 from moxe.output import ConditionedGateOutput, MoxEForwardPassOutput, MoxELayerOutput
 from moxe.tensorboard import TensorBoardLogger
@@ -637,8 +638,7 @@ def main(cfg: DictConfig):
                 pbar.set_postfix(postfix_data)
                 pbar.update(1)
 
-            # --- Evaluation after each epoch ---
-
+        # --- Evaluation after each epoch ---
         eval_start_time = time.perf_counter()
         logger.info(f"Starting evaluation after epoch {epoch + 1}...")
         eval_metrics.reset()
@@ -700,36 +700,31 @@ def main(cfg: DictConfig):
                 "input_ids"
             ]
 
-            # Simple greedy generation for monitoring
-            try:
-                with jax.disable_jit():
-                    for _ in range(min(MAX_NEW_TOKENS, 50)):  # Limit for monitoring
-                        output = model(input_ids)
-                        next_token_logits = output.logits[0, -1, :]
-                        if GREEDY:
-                            next_token = jnp.argmax(next_token_logits)
-                        else:
-                            next_token = jax.random.categorical(
-                                jax.random.PRNGKey(42 + epoch),
-                                next_token_logits / TEMPERATURE,
-                            )
-                        input_ids = jnp.concatenate(
-                            [input_ids, next_token[None, None]], axis=1
-                        )
+            batch_size = input_ids.shape[0]
+            initial_len = input_ids.shape[1]
+            total_length = initial_len + MAX_NEW_TOKENS
+            full_x_init = jnp.zeros((batch_size, total_length), dtype=jnp.int32)
+            full_x_init = full_x_init.at[:, :initial_len].set(input_ids)
+            # full_x_init = jax.device_put(full_x_init, DATA_SHARDING)
+            key = jax.random.key(123 + epoch)
+            initial_carry: GenerationCarry = (
+                full_x_init,
+                initial_len,
+                key,
+            )
 
-                        # Stop if EOS token
-                        if next_token == tokenizer.eos_token_id:
-                            break
+            sequences = generate_sequence_scan(
+                model,
+                initial_carry,
+                max_new_tokens=MAX_NEW_TOKENS,
+                vocab_size=config.xlstm.vocab_size,
+                temperature=TEMPERATURE,
+                greedy=GREEDY,
+            )
 
-                generated_text = tokenizer.decode(
-                    input_ids[0], skip_special_tokens=True
-                )
-                tb_logger.writer.text(
-                    "train/generation", generated_text, step=global_step
-                )
-                logger.info(f"Generated: {generated_text}")
-            except Exception as e:
-                logger.warning(f"Text generation failed: {e}")
+            sequences = tokenizer.batch_decode(sequences)
+            for seq in sequences:
+                tb_logger.writer.text("train/generation", seq, step=global_step)
 
         else:
             logger.warning(

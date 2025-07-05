@@ -154,24 +154,19 @@ def checkpoint_post_eval(
     logger.info(f"Epoch {epoch + 1} Evaluation Results: {eval_log_data}")
 
     # Update metrics for checkpointing and save checkpoint
-    if best_metric_key in computed_eval_metrics:
-        latest_eval_metrics_for_ckpt = {
-            best_metric_key: float(computed_eval_metrics[best_metric_key])
-        }
+    latest_eval_metrics_for_ckpt = {
+        best_metric_key: float(computed_eval_metrics[best_metric_key])
+    }
 
-        logger.info(
-            f"Saving checkpoint at end of epoch {epoch + 1} (step {global_step}) with eval_loss={latest_eval_metrics_for_ckpt[best_metric_key]:.6f}..."
-        )
+    logger.info(
+        f"Saving checkpoint at end of epoch {epoch + 1} (step {global_step}) with eval_loss={latest_eval_metrics_for_ckpt[best_metric_key]:.6f}..."
+    )
 
-        state = nnx.state(model, nnx.Param)
-        checkpoint_manager.save(
-            global_step,
-            args=ocp.args.PyTreeSave(state),
-            metrics=latest_eval_metrics_for_ckpt,
-        )
-        checkpoint_manager.wait_until_finished()
-        logger.info(f"Checkpoint saved at end of epoch {epoch + 1}")
-    else:
-        logger.warning(
-            f"Key metric '{best_metric_key}' not found in eval metrics, skipping checkpoint save"
-        )
+    state = nnx.state(model, nnx.Param)
+    checkpoint_manager.save(
+        global_step,
+        args=ocp.args.PyTreeSave(state),
+        metrics=latest_eval_metrics_for_ckpt,
+    )
+    checkpoint_manager.wait_until_finished()
+    logger.info(f"Checkpoint saved at end of epoch {epoch + 1}")
