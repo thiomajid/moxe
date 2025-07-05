@@ -33,7 +33,7 @@ def create_sharded_model(mesh: Mesh, config: MoxEConfig):
 @hydra.main(config_path="./configs", config_name="config", version_base="1.1")
 def main(cfg: DictConfig):
     config = MoxEConfig.from_dict(OmegaConf.to_container(cfg["model"], resolve=True))
-    USE_JIT = True
+    USE_JIT = False
     model = None
 
     dummy_input = jax.random.randint(
@@ -61,12 +61,14 @@ def main(cfg: DictConfig):
             dummy_input,
             compute_d_loss=True,
             compute_group_loss=True,
+            return_layers_outputs=True,
         )
     else:
         output = model(
             dummy_input,
             compute_d_loss=True,
             compute_group_loss=True,
+            return_layers_outputs=True,
         )
 
     print(output.logits.shape)

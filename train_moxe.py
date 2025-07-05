@@ -66,8 +66,9 @@ def _accumulate_loss(
         if path and isinstance(path[-1], jtu.GetAttrKey) and path[-1].name == attr:
             return leaf
         else:
-            # Return a zero with the same shape and type as the leaf to maintain tree structure.
-            return jtu.tree_map(jnp.zeros_like, leaf)
+            # if the current leaf is not what I am looking for, simply return 0 so that jnp.add won't
+            # yield a broadcasting error
+            return 0.0
 
     # Create a new tree containing only the target losses and zeros everywhere else.
     loss_tree = jtu.tree_map_with_path(f=_get_loss_leaf, tree=outputs, is_leaf=is_leaf)
