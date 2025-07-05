@@ -7,6 +7,7 @@ import time
 import typing as tp
 from dataclasses import asdict
 from pathlib import Path
+from pprint import pprint
 
 import grain.python as grain
 import hydra
@@ -328,8 +329,8 @@ def main(cfg: DictConfig):
     config_dict = OmegaConf.to_container(cfg["model"], resolve=True)
     config_dict["xlstm"]["vocab_size"] = tokenizer.vocab_size
     config_dict["xlstm"]["pad_token_id"] = tokenizer.pad_token_id
-    print("Model config:")
-    print(config_dict)
+    logger.info("Model config:")
+    pprint(config_dict)
 
     config = MoxEConfig.from_dict(config_dict)
 
