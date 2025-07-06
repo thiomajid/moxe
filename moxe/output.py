@@ -142,3 +142,4 @@ class MoxEForwardPassOutput:
     load_balancing_loss: jax.Array
     d_loss: jax.Array
     group_loss: jax.Array
+    layers_outputs: tuple[MoxELayerOutput]

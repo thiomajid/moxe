@@ -50,7 +50,6 @@ from xlstm_jax.utils import str2dtype
 def _accumulate_loss(
     outputs: tp.List[MoxELayerOutput | ConditionedGateOutput],
     attr: str,
-    is_leaf: tp.Callable[[tp.Any], bool] = None,
 ):
     """
     Accumulates a specific loss attribute from a Pytree of layer outputs
@@ -143,6 +142,7 @@ def loss_fn(
         load_balancing_loss=load_balancing_loss,
         d_loss=d_loss,
         group_loss=group_loss,
+        layers_outputs=layers_outputs,
     )
 
     return total_loss, aux_data
@@ -180,23 +180,23 @@ def compute_grads_and_metrics(
         return total_loss, aux_losses
 
     grad_fn = nnx.value_and_grad(_loss_fn, has_aux=True)
-    (loss, aux_losses), grads = grad_fn(model, batch)
+    (loss, aux_data), grads = grad_fn(model, batch)
 
-    perplexity = jnp.exp(aux_losses.ce_loss)
+    perplexity = jnp.exp(aux_data.ce_loss)
     grad_norm = optax.global_norm(grads)
 
     metrics.update(
         loss=loss,
         perplexity=perplexity,
         grad_norm=grad_norm,
-        ce_loss=aux_losses.ce_loss,
-        z_loss=aux_losses.z_loss,
-        load_balancing_loss=aux_losses.load_balancing_loss,
-        d_loss=aux_losses.d_loss,
-        group_loss=aux_losses.group_loss,
+        ce_loss=aux_data.ce_loss,
+        z_loss=aux_data.z_loss,
+        load_balancing_loss=aux_data.load_balancing_loss,
+        d_loss=aux_data.d_loss,
+        group_loss=aux_data.group_loss,
     )
 
-    return loss, grads, grad_norm
+    return loss, grads, grad_norm, aux_data.layers_outputs
 
 
 @functools.partial(
@@ -559,7 +559,7 @@ def main(cfg: DictConfig):
                 _batch = (input_ids, labels)
 
                 # Compute gradients and metrics
-                loss, grads, grad_norm = compute_grads_and_metrics(
+                loss, grads, grad_norm, layers_outputs = compute_grads_and_metrics(
                     model=model,
                     metrics=train_metrics,
                     batch=_batch,
@@ -587,6 +587,8 @@ def main(cfg: DictConfig):
                     # Log metrics to TensorBoard
                     for metric, value in computed_metrics.items():
                         tb_logger.log_scalar(f"train/{metric}", value, global_step)
+
+                    tb_logger.write_moe_layers_metrics(layers_outputs, global_step)
 
                     train_metrics.reset()
 
