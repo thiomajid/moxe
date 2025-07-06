@@ -22,10 +22,14 @@ class mLSTMCellConfig:
 class mLSTMCell(nnx.Module):
     config_class = mLSTMCellConfig
 
-    def __init__(self, config: mLSTMCellConfig, *, rngs: nnx.Rngs, dtype=jnp.float32):
-        self.config = config
-        self.dtype = dtype
-
+    def __init__(
+        self,
+        config: mLSTMCellConfig,
+        *,
+        mesh: jax.sharding.Mesh,
+        rngs: nnx.Rngs,
+        dtype=jnp.float32,
+    ):
         # Store configuration parameters for easier access
         self.context_length = config.context_length
         self.embedding_dim = config.embedding_dim
@@ -40,21 +44,37 @@ class mLSTMCell(nnx.Module):
         self.igate = nnx.Linear(
             in_features=3 * config.embedding_dim,
             out_features=config.num_heads,
-            kernel_init=jax.nn.initializers.zeros,
-            bias_init=jax.nn.initializers.normal(stddev=0.1, dtype=dtype),
             rngs=rngs,
             dtype=dtype,
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.zeros_init(),
+                sharding=(None, "tp"),
+                mesh=mesh,
+            ),
+            bias_init=nnx.with_partitioning(
+                nnx.initializers.normal(stddev=0.1, dtype=dtype),
+                sharding=("tp",),
+                mesh=mesh,
+            ),
         )
 
         self.fgate = nnx.Linear(
             in_features=3 * config.embedding_dim,
             out_features=config.num_heads,
-            kernel_init=jax.nn.initializers.zeros,
-            bias_init=bias_linspace_initializer(start=3.0, end=6.0),
             rngs=rngs,
             dtype=dtype,
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.zeros_init(),
+                sharding=(None, "tp"),
+                mesh=mesh,
+            ),
+            bias_init=nnx.with_partitioning(
+                bias_linspace_initializer(start=3.0, end=6.0),
+                sharding=("tp",),
+                mesh=mesh,
+            ),
         )
 
         # Output normalization
@@ -64,24 +84,34 @@ class mLSTMCell(nnx.Module):
             use_bias=False,
             rngs=rngs,
             dtype=dtype,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(
+                nnx.initializers.ones_init(),
+                sharding=("tp",),
+                mesh=mesh,
+            ),
+            bias_init=nnx.with_partitioning(
+                nnx.initializers.zeros_init(),
+                sharding=("tp",),
+                mesh=mesh,
+            ),
         )
 
-        # Create causal mask buffer
-        # INFO: if the mask is not an instance of nnx.Param, the jit compilation
-        # fails when nnx will try to flatten the mLSTMCell's pytree
         self.causal_mask = nnx.Variable(
             jnp.tril(
-                jnp.ones((config.context_length, config.context_length), dtype=bool)
+                jnp.ones(
+                    (config.context_length, config.context_length),
+                    dtype=jnp.bool,
+                )
             )
         )
 
-    # @nnx.jit
     def __call__(
         self,
-        q: jnp.ndarray,
-        k: jnp.ndarray,
-        v: jnp.ndarray,
-    ) -> jnp.ndarray:
+        q: jax.Array,
+        k: jax.Array,
+        v: jax.Array,
+    ) -> jax.Array:
         """Forward pass for parallel processing of the entire sequence.
 
         Args:
@@ -97,26 +127,24 @@ class mLSTMCell(nnx.Module):
         # Combine inputs for gate computation
         if_gate_input = jnp.concatenate([q, k, v], axis=-1)
 
+        # Compute input and forget gate pre-activations
+        igate_preact = self.igate(if_gate_input)  # (B, S, NH)
+        igate_preact = jnp.transpose(igate_preact, (0, 2, 1))
+        igate_preact = igate_preact[..., None]  # (B, NH, S, 1)
+
+        fgate_preact = self.fgate(if_gate_input)  # (B, S, NH)
+        fgate_preact = jnp.transpose(fgate_preact, (0, 2, 1))
+        fgate_preact = fgate_preact[..., None]  # (B, NH, S, 1)
+
         # Reshape for multi-head processing
-        q_reshaped = q.reshape(B, S, self.config.num_heads, -1)  # (B, S, NH, DH)
-        k_reshaped = k.reshape(B, S, self.config.num_heads, -1)  # (B, S, NH, DH)
-        v_reshaped = v.reshape(B, S, self.config.num_heads, -1)  # (B, S, NH, DH)
+        q_reshaped = q.reshape(B, S, self.num_heads, -1)  # (B, S, NH, DH)
+        k_reshaped = k.reshape(B, S, self.num_heads, -1)  # (B, S, NH, DH)
+        v_reshaped = v.reshape(B, S, self.num_heads, -1)  # (B, S, NH, DH)
 
         # Transpose to put heads dimension before sequence dimension
         q_transposed = jnp.transpose(q_reshaped, (0, 2, 1, 3))  # (B, NH, S, DH)
         k_transposed = jnp.transpose(k_reshaped, (0, 2, 1, 3))  # (B, NH, S, DH)
         v_transposed = jnp.transpose(v_reshaped, (0, 2, 1, 3))  # (B, NH, S, DH)
-
-        # Compute input and forget gate pre-activations
-        igate_preact = self.igate(if_gate_input)  # (B, S, NH)
-        igate_preact = jnp.transpose(igate_preact, (0, 2, 1))[
-            ..., None
-        ]  # (B, NH, S, 1)
-
-        fgate_preact = self.fgate(if_gate_input)  # (B, S, NH)
-        fgate_preact = jnp.transpose(fgate_preact, (0, 2, 1))[
-            ..., None
-        ]  # (B, NH, S, 1)
 
         # Get causal mask of appropriate size
         causal_mask = self.causal_mask[:S, :S]
@@ -139,18 +167,3 @@ class mLSTMCell(nnx.Module):
         h_state_norm = h_state_norm.reshape(B, S, -1)  # (B, S, H)
 
         return h_state_norm
-
-    def reset_parameters(self, rngs: nnx.Rngs) -> None:
-        self.outnorm.reset_parameters(rngs)
-
-        # forget gate initialization
-        self.fgate.kernel = nnx.Param(jnp.zeros_like(self.fgate.kernel))
-
-        self.fgate.bias = nnx.Param(
-            jnp.linspace(3.0, 6.0, num=self.fgate.bias.value.size).reshape(
-                self.fgate.bias.value.shape
-            )
-        )
-        # input gate initialization
-        self.igate.kernel = nnx.Param(jnp.zeros_like(self.igate.kernel))
-        self.igate.bias = nnx.Param(jnp.zeros_like(self.igate.bias))

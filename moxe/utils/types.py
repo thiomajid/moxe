@@ -5,6 +5,7 @@ from pathlib import Path
 
 import jax.numpy as jnp
 from flax import nnx
+from jax.sharding import Mesh
 
 from moxe.config import MoxEConfig
 from moxe.modules.ffn_expert import FeedForwardExpert
@@ -36,16 +37,16 @@ def get_moe_layer(layer_type: str):
     )
 
 
-def get_expert_modules(config: MoxEConfig, rngs: nnx.Rngs, dtype=jnp):
+def get_expert_modules(config: MoxEConfig, mesh: Mesh, rngs: nnx.Rngs, dtype=jnp):
     if config.expert_type == ExpertModule.MLP:
         return [
-            FeedForwardExpert(config, rngs=rngs, dtype=dtype)
+            FeedForwardExpert(config, mesh=mesh, rngs=rngs, dtype=dtype)
             for _ in range(config.num_experts)
         ]
 
     elif config.expert_type == ExpertModule.mLSTM:
         return [
-            mLSTMBlock(config.xlstm.mlstm_block, rngs=rngs, dtype=dtype)
+            mLSTMBlock(config.xlstm.mlstm_block, mesh=mesh, rngs=rngs, dtype=dtype)
             for _ in range(config.num_experts)
         ]
 
@@ -64,19 +65,19 @@ def get_expert_modules(config: MoxEConfig, rngs: nnx.Rngs, dtype=jnp):
 
         if config.expert_type == ExpertModule.sLSTM:
             return [
-                sLSTMBlock(__config.slstm_block, rngs=rngs, dtype=dtype)
+                sLSTMBlock(__config.slstm_block, mesh=mesh, rngs=rngs, dtype=dtype)
                 for _ in range(config.num_experts)
             ]
 
         expert_per_group = config.num_experts // 2
         mlstm_experts = [
-            mLSTMBlock(config.xlstm.mlstm_block, rngs=rngs, dtype=dtype)
+            mLSTMBlock(config.xlstm.mlstm_block, mesh=mesh, rngs=rngs, dtype=dtype)
             for _ in range(expert_per_group)
         ]
 
         # blocks[0] otherwise an additional LayerNorm is added by xLSTMBlockStack
         sltm_experts = [
-            sLSTMBlock(__config.slstm_block, rngs=rngs, dtype=dtype)
+            sLSTMBlock(__config.slstm_block, mesh=mesh, rngs=rngs, dtype=dtype)
             for _ in range(expert_per_group)
         ]
 

@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax import lax
+from jax.sharding import Mesh
 
 from xlstm_jax.xlstm_block_stack import xLSTMBlockStack
 
@@ -15,7 +16,14 @@ from .gate import BiasConditionedGate
 
 
 class MoxELayer(nnx.Module):
-    def __init__(self, config: MoxEConfig, *, rngs: nnx.Rngs, dtype=jnp.float32):
+    def __init__(
+        self,
+        config: MoxEConfig,
+        *,
+        mesh: Mesh,
+        rngs: nnx.Rngs,
+        dtype=jnp.float32,
+    ):
         assert config.num_experts % 2 == 0, "num_experts must be even"
         assert config.num_experts > 0, "At least 2 experts per layer"
 
@@ -30,15 +38,23 @@ class MoxELayer(nnx.Module):
         mixer_config.slstm_at = [0]
         _block_map = [1, 0]
         mixer_config._block_map = ",".join(map(str, _block_map))
-        self.sequence_mixer = xLSTMBlockStack(mixer_config, rngs=rngs, dtype=dtype)
+        self.sequence_mixer = xLSTMBlockStack(
+            mixer_config, mesh=mesh, rngs=rngs, dtype=dtype
+        )
 
-        self.gate = self.__create_router(config, rngs, dtype=dtype)
-        self.experts = get_expert_modules(config, rngs=rngs, dtype=dtype)
+        self.gate = self.__create_router(config, mesh=mesh, rngs=rngs, dtype=dtype)
+        self.experts = get_expert_modules(config, mesh=mesh, rngs=rngs, dtype=dtype)
 
-    def __create_router(self, config: MoxEConfig, rngs: nnx.Rngs, dtype=jnp.float32):
+    def __create_router(
+        self,
+        config: MoxEConfig,
+        mesh: Mesh,
+        rngs: nnx.Rngs,
+        dtype=jnp.float32,
+    ):
         match config.router_type:
             case SparsityGateType.CONDITIONED_ADDITION:
-                return BiasConditionedGate(config, rngs=rngs, dtype=dtype)
+                return BiasConditionedGate(config, mesh=mesh, rngs=rngs, dtype=dtype)
             case SparsityGateType.STANDARD:
                 return nnx.Linear(
                     config.xlstm.embedding_dim,
@@ -47,6 +63,16 @@ class MoxELayer(nnx.Module):
                     dtype=dtype,
                     param_dtype=dtype,
                     rngs=rngs,
+                    kernel_init=nnx.with_partitioning(
+                        nnx.initializers.lecun_normal(),
+                        sharding=(None, "tp"),
+                        mesh=mesh,
+                    ),
+                    bias_init=nnx.with_partitioning(
+                        nnx.initializers.zeros_init(),
+                        sharding=("tp",),
+                        mesh=mesh,
+                    ),
                 )
 
         raise ValueError(
@@ -56,13 +82,13 @@ class MoxELayer(nnx.Module):
 
     def __call__(
         self,
-        h_t: jnp.ndarray,
+        h_t: jax.Array,
         compute_d_loss: bool = True,
         compute_group_loss: bool = True,
     ):
-        h_t = self.sequence_mixer(h_t)
+        h_t, _ = self.sequence_mixer(h_t)
         B, S, D = h_t.shape
-        gate_logits: jnp.ndarray | None = None  # (B*S, E)
+        gate_logits: jax.Array | None = None  # (B*S, E)
         gate_output: ConditionedGateOutput | None = None
 
         if isinstance(self.gate, BiasConditionedGate):
@@ -85,58 +111,53 @@ class MoxELayer(nnx.Module):
 
         flat_h_t = h_t.reshape(B * S, D)
 
-        # Compute outputs only for top-k experts per token
-        def apply_expert_to_token(
-            token_indices: jax.Array,
-            token_weights: jax.Array,
-            token_input: jax.Array,
-        ):
-            """Apply top-k experts to a single token"""
+        # Expert-level parallelism: each expert processes all its assigned tokens
+        def compute_expert_outputs(expert_idx: int, inputs: jax.Array):
+            """Compute outputs for a single expert across all tokens"""
+            # Create mask for tokens assigned to this expert
+            # top_k_indices: (B*S, top_k), expert_idx: scalar
+            expert_mask = top_k_indices == expert_idx  # (B*S, top_k)
 
-            def apply_single_expert(expert_idx: jax.Array, weight: jax.Array):
-                # Reshape token_input to (1, 1, D) for xLSTM which expects (B, S, D)
-                reshaped_input = token_input.reshape(1, 1, -1)
-                expert_output = lax.switch(
-                    expert_idx,
-                    self.experts,
-                    operand=reshaped_input,
-                )
-                # Extract the token output: (1, 1, D) -> (D,)
-                expert_output = expert_output[0, 0]
-                return expert_output * weight
+            # Get weights for this expert across all tokens
+            expert_weights = jnp.where(expert_mask, top_k_weights, 0.0)  # (B*S, top_k)
+            expert_weights = jnp.sum(expert_weights, axis=-1)  # (B*S,)
 
-            # Map over the k selected experts for this token
-            weighted_outputs = jax.vmap(apply_single_expert)(
-                token_indices, token_weights
+            # Create token selection mask (any token that routes to this expert)
+            token_mask = jnp.any(expert_mask, axis=-1)  # (B*S,)
+
+            # Apply expert to ALL tokens (will be masked out later)
+            # expert_input = inputs.reshape(B * S, 1, D)
+            expert_input = inputs.reshape(B * S, 1, D)
+            expert_output: jax.Array = lax.switch(
+                expert_idx, self.experts, operand=expert_input
             )
-            return jnp.sum(weighted_outputs, axis=0)
+            expert_output = expert_output.reshape(B * S, D)  # (B*S, D)
 
-        # Apply to all tokens
-        expert_outputs = jax.vmap(apply_expert_to_token)(
-            top_k_indices, top_k_weights, flat_h_t
-        )  # Shape: (B*S, D)
+            # Apply weights and mask
+            weighted_output = expert_output * expert_weights[..., None]  # (B*S, D)
+            masked_output = weighted_output * token_mask[..., None]  # (B*S, D)
 
-        final_hidden_states = expert_outputs.reshape(B, S, D)
+            return masked_output
 
-        # --- Rest of the function remains the same ---
-        z_loss = lax.cond(
-            self.router_type == SparsityGateType.STANDARD,
-            lambda: router_z_loss(gate_logits),
-            lambda: gate_output.z_loss,
-        )
+            # Vectorize across all experts
 
-        load_balancing_loss, expert_load, expert_token_counts = lax.cond(
-            self.router_type == SparsityGateType.STANDARD,
-            lambda: auxiliary_load_balancing_loss(
+        expert_outputs = jax.vmap(compute_expert_outputs, in_axes=(0, None))(
+            jnp.arange(self.num_experts), flat_h_t
+        )  # (num_experts, B*S, D)
+
+        # Sum contributions from all experts
+        final_outputs = jnp.sum(expert_outputs, axis=0)  # (B*S, D)
+        final_hidden_states = final_outputs.reshape(B, S, D)
+
+        # ---------------- Auxiliary lossess ---------------------------
+        z_loss = router_z_loss(gate_logits)
+
+        load_balancing_loss, expert_load, expert_token_counts = (
+            auxiliary_load_balancing_loss(
                 num_experts=self.num_experts,
                 router_probs=router_probs,
                 top_k=self.top_k,
-            ),
-            lambda: (
-                gate_output.load_balancing_loss,
-                gate_output.expert_load,
-                gate_output.expert_token_counts,
-            ),
+            )
         )
 
         return MoxELayerOutput(

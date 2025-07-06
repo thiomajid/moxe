@@ -8,10 +8,8 @@ from moxe.utils.parser import parse_xlstm_config_dict
 from xlstm_jax.xlstm_lm_model import xLSTMLMModelConfig
 
 
-@dataclass
+@dataclass(unsafe_hash=True, order=True)
 class MoxEConfig:
-    # model_type = "MoxE"
-
     def __init__(
         self,
         num_experts: int = 4,
@@ -55,7 +53,23 @@ class MoxEConfig:
         """
 
     def to_dict(self):
-        return asdict(self)
+        return {
+            "xlstm": asdict(self.xlstm),
+            "num_experts": self.num_experts,
+            "top_k_experts": self.top_k_experts,
+            "num_layers": self.num_layers,
+            "moe_layer_type": self.moe_layer_type,
+            "router_type": self.router_type,
+            "expert_type": self.expert_type,
+            "modulation_bias": self.modulation_bias,
+            "gate_bias": self.gate_bias,
+            "gamma": self.gamma,
+            "eps": self.eps,
+            "difficulty_threshold": self.difficulty_threshold,
+            "ffn_dim": self.ffn_dim,
+            "group_wise_loss": self.group_wise_loss,
+            "post_layers_norm": self.post_layers_norm,
+        }
 
     @classmethod
     def from_dict(cls, config_dict: dict | DictConfig, **kwargs):

@@ -2,14 +2,15 @@
 # Maximilian Beck, Korbinian Pöppel
 # Converted to JAX/Flax by Abdoul Majid O. Thiombiano
 from dataclasses import dataclass, field
-from typing import Any, Tuple
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from jax.sharding import Mesh
 
 
-@dataclass
+@dataclass(unsafe_hash=True, order=True)
 class CausalConv1dConfig:
     feature_dim: int = None  # F
     kernel_size: int = 4
@@ -41,76 +42,46 @@ class CausalConv1d(nnx.Module):
         self,
         config: CausalConv1dConfig,
         *,
+        mesh: Mesh,
         rngs: nnx.Rngs,
         dtype=jnp.float32,
     ):
-        self.config = config
-        self.dtype = dtype
-        self.groups = self.config.feature_dim
-        if self.config.channel_mixing:
+        self.groups = config.feature_dim
+        self.kernel_size = config.kernel_size
+
+        if config.channel_mixing:
             self.groups = 1
 
-        if self.config.kernel_size == 0:
-            # No convolution needed
+        if config.kernel_size == 0:
             self.conv = None
         else:
             # padding of this size assures temporal causality.
-            self.pad = self.config.kernel_size - 1
-
+            self.pad = config.kernel_size - 1
             self.conv = nnx.Conv(
-                in_features=self.config.feature_dim,
-                out_features=self.config.feature_dim,
-                kernel_size=(self.config.kernel_size,),
+                in_features=config.feature_dim,
+                out_features=config.feature_dim,
+                kernel_size=(config.kernel_size,),
                 padding=[(self.pad, 0)],
                 feature_group_count=self.groups,
-                kernel_init=jax.nn.initializers.lecun_normal(),
-                use_bias=self.config.causal_conv_bias,
-                bias_init=jax.nn.initializers.zeros,
+                use_bias=config.causal_conv_bias,
                 rngs=rngs,
-                dtype=self.dtype,
+                dtype=dtype,
+                param_dtype=dtype,
+                kernel_init=nnx.with_partitioning(
+                    initializer=jax.nn.initializers.lecun_normal(),
+                    sharding=(None, None, "tp"),
+                    mesh=mesh,
+                ),
+                bias_init=nnx.with_partitioning(
+                    initializer=nnx.initializers.zeros_init(),
+                    sharding=("tp",),
+                    mesh=mesh,
+                ),
             )
 
-    def __call__(self, x: jnp.ndarray):
-        if self.config.kernel_size == 0:
-            return x
-
-        # With nnx.Conv the feature dimension is the last one so no need to transpose
-        return self.conv(x)  # (B, T+pad, F) tensor
-
-    def reset_parameters(self, rngs: nnx.Rngs):
-        """Reset the parameters of the convolutional layer."""
-        if self.config.kernel_size == 0:
-            return
-
-        # Reset kernel
-        kernel_init = jax.nn.initializers.lecun_normal()
-        self.conv.kernel = nnx.Param(
-            kernel_init(
-                rngs.params(),
-                self.conv.kernel.value.shape,
-                self.conv.kernel.value.dtype,
-            )
+    def __call__(self, x: jax.Array):
+        return jax.lax.cond(
+            self.kernel_size == 0,
+            lambda: x,
+            lambda: self.conv(x),
         )
-
-        # Reset bias if it exists
-        if self.config.causal_conv_bias:
-            bias_init = jax.nn.initializers.zeros
-            self.conv.bias = nnx.Param(
-                bias_init(
-                    rngs.params(),
-                    self.conv.bias.value.shape,
-                    self.conv.bias.value.dtype,
-                )
-            )
-
-    def _create_weight_decay_optim_groups(
-        self,
-    ) -> Tuple[Tuple[nnx.Param, ...], Tuple[nnx.Param, ...]]:
-        if self.config.kernel_size == 0:
-            return (), ()
-        else:
-            weight_decay = (self.conv.kernel,)
-            no_weight_decay = ()
-            if self.config.causal_conv_bias and self.bias is not None:
-                no_weight_decay = (self.conv.bias,)
-            return weight_decay, no_weight_decay

@@ -9,7 +9,6 @@ from datasets import IterableDataset, load_dataset, load_from_disk
 from tqdm import tqdm
 from transformers import AutoTokenizer, DataCollatorForLanguageModeling
 
-from ..config import MoxEConfig
 from .arguments import CustomArgs
 
 
@@ -178,7 +177,9 @@ def create_dataloaders(
     logger: logging.Logger,
     args: CustomArgs,
     tokenizer: AutoTokenizer,
-    config: MoxEConfig,
+    max_seq_length: int,
+    train_data_ops: list[grain.MapTransform],
+    eval_data_ops: list[grain.MapTransform],
 ):
     logger.info(
         f"Loading training dataset from {args.train_dataset_url} with {args.train_samples} samples"
@@ -188,7 +189,7 @@ def create_dataloaders(
         hub_url=args.train_dataset_url,
         subset=args.train_subset,
         features=args.features,
-        max_seq_length=config.xlstm.context_length,
+        max_seq_length=max_seq_length,
         tokenizer=tokenizer,
         split=args.train_split,
         num_samples=args.train_samples,
@@ -204,7 +205,7 @@ def create_dataloaders(
         shuffle=True,
         seed=args.seed,
         shard_options=grain.NoSharding(),
-        num_epochs=int(args.num_train_epochs),
+        num_epochs=1,
     )
 
     train_loader = grain.DataLoader(
@@ -212,17 +213,7 @@ def create_dataloaders(
         sampler=train_sampler,
         worker_count=4,
         worker_buffer_size=2,
-        operations=[
-            grain.Batch(args.per_device_train_batch_size, drop_remainder=True),
-            DataCollatatorTransform(
-                target_columns=["input_ids", "labels", "attention_mask"],
-                collator=DataCollatorForLanguageModeling(
-                    tokenizer=tokenizer,
-                    mlm=False,
-                    return_tensors="np",
-                ),
-            ),
-        ],
+        operations=train_data_ops,
     )
 
     logger.info(
@@ -233,7 +224,7 @@ def create_dataloaders(
         hub_url=args.eval_dataset_url,
         subset=args.eval_subset,
         features=args.features,
-        max_seq_length=config.xlstm.context_length,
+        max_seq_length=max_seq_length,
         tokenizer=tokenizer,
         split=args.eval_split,
         num_samples=args.eval_samples,
@@ -249,7 +240,7 @@ def create_dataloaders(
         shuffle=False,
         seed=args.seed,
         shard_options=grain.NoSharding(),
-        num_epochs=int(args.num_train_epochs),
+        num_epochs=1,
     )
 
     eval_loader = grain.DataLoader(
@@ -257,17 +248,7 @@ def create_dataloaders(
         sampler=eval_sampler,
         worker_count=4,
         worker_buffer_size=2,
-        operations=[
-            grain.Batch(args.per_device_eval_batch_size),
-            DataCollatatorTransform(
-                target_columns=["input_ids", "labels", "attention_mask"],
-                collator=DataCollatorForLanguageModeling(
-                    tokenizer=tokenizer,
-                    mlm=False,
-                    return_tensors="np",
-                ),
-            ),
-        ],
+        operations=eval_data_ops,
     )
 
     return train_loader, eval_loader

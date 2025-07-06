@@ -20,18 +20,19 @@ slstm_pointwise_function_registry: dict[str, Callable] = {
 
 @functools.partial(
     jax.jit,
-    static_argnames=("pointwise_forward",),
+    static_argnames=("pointwise_forward", "mesh"),
 )
 def slstm_forward(
-    x: jnp.ndarray,  # [S, B, G*I]
-    states: jnp.ndarray,  # [4, B, H] only the first is used for recurrence!
-    R: jnp.ndarray,  # [K, R*H, H] - K num_heads
-    b: jnp.ndarray,  # [T*H]
+    x: jax.Array,  # [S, B, G*I]
+    states: jax.Array,  # [4, B, H] only the first is used for recurrence!
+    R: jax.Array,  # [K, R*H, H] - K num_heads
+    b: jax.Array,  # [T*H]
     pointwise_forward: Callable[
-        [jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],
-        tuple[jnp.ndarray, jnp.ndarray],
+        [jax.Array, jax.Array, jax.Array, jax.Array],
+        tuple[jax.Array, jax.Array],
     ],
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    mesh: jax.sharding.Mesh,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
     """
     Forward pass for sLSTM over a full sequence.
 
@@ -41,7 +42,6 @@ def slstm_forward(
         R: Recurrent kernel of shape [K, R*H, H] (K: num_heads, R: num_gates, H: head_dim)
         b: Recurrent bias of shape [T*H]
         pointwise_forward: Function implementing the pointwise operations
-        constants: Additional constants for the pointwise function
 
     Returns:
         tuple of:
@@ -63,18 +63,17 @@ def slstm_forward(
     chex.assert_equal(hidden_dim, states.shape[2])
 
     g = jnp.zeros(
-        (sequence_dim + 1, num_gates_t, batch_dim, hidden_dim),
+        shape=(sequence_dim + 1, num_gates_t, batch_dim, hidden_dim),
         dtype=x.dtype,
     )
 
     states_all = jnp.zeros(
-        (num_states, sequence_dim + 1, batch_dim, hidden_dim),
-        dtype=x.dtype,
+        (num_states, sequence_dim + 1, batch_dim, hidden_dim), dtype=x.dtype
     )
 
     states_all = states_all.at[:, 0].set(states)
 
-    def process_timestep(carry: tuple[jnp.ndarray, ...], time_idx):
+    def process_timestep(carry: tuple[jax.Array, ...], time_idx):
         current_states, states_all, g = carry
         current_x = x[time_idx]
 
@@ -85,9 +84,16 @@ def slstm_forward(
         Ry = jnp.matmul(hidden_reshaped, R_reshaped).reshape(
             batch_dim, num_heads, num_gates_r, head_dim
         )
+
         Ry = jnp.transpose(Ry, (0, 2, 1, 3)).reshape(batch_dim, -1)
 
-        new_states, gates = pointwise_forward(current_x, Ry, b, current_states)
+        new_states, gates = pointwise_forward(
+            current_x,
+            Ry,
+            b,
+            current_states,
+            mesh=mesh,
+        )
 
         new_states = new_states.astype(current_states.dtype)
         gates = gates.astype(current_states.dtype)
@@ -97,8 +103,11 @@ def slstm_forward(
 
         return (new_states, states_all, g), None
 
+    init_carry = (states, states_all, g)
     (final_state, states_all, g), _ = jax.lax.scan(
-        process_timestep, (states, states_all, g), jnp.arange(sequence_dim)
+        f=process_timestep,
+        init=init_carry,
+        xs=jnp.arange(sequence_dim),
     )
 
     return states_all, final_state, g
@@ -109,12 +118,12 @@ def slstm_forward(
     static_argnames=("pointwise_forward",),
 )
 def slstm_forward_step(
-    x: jnp.ndarray,  # [B, G*I]
-    states: jnp.ndarray,  # [4, B, H] only the first is used for recurrence!
-    R: jnp.ndarray,  # [K, R*H, H] - K num_heads
-    b: jnp.ndarray,  # [T*H]
+    x: jax.Array,  # [B, G*I]
+    states: jax.Array,  # [4, B, H] only the first is used for recurrence!
+    R: jax.Array,  # [K, R*H, H] - K num_heads
+    b: jax.Array,  # [T*H]
     pointwise_forward: Callable,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+) -> tuple[jax.Array, jax.Array]:
     """
     Forward pass for a single step of the sLSTM.
 
@@ -124,26 +133,25 @@ def slstm_forward_step(
         R: Recurrent weights tensor of shape [K, R*H, H] where K is num_heads
         b: Bias tensor of shape [T*H]
         pointwise_forward: Function implementing the pointwise operations
-        constants: Additional constants for the pointwise function
 
     Returns:
         tuple of:
         - New state: [num_states, 1, B, H]
         - Gate activations: [1, num_gates, B, H]
     """
-    num_states = states.shape[0]
+    # num_states = states.shape[0]
     batch_dim = states.shape[1]
-    hidden_dim = states.shape[2]
+    # hidden_dim = states.shape[2]
     num_heads = R.shape[0]
     head_dim = R.shape[2]
     num_gates_r = R.shape[1] // R.shape[2]
-    num_gates_t = b.shape[0] // hidden_dim
+    # num_gates_t = b.shape[0] // hidden_dim
 
     # Initialize arrays
-    g = jnp.zeros(
-        (1, num_gates_t, batch_dim, hidden_dim),
-        dtype=x.dtype,
-    )
+    # g = jnp.zeros(
+    #     (1, num_gates_t, batch_dim, hidden_dim),
+    #     dtype=x.dtype,
+    # )
 
     # Compute recurrent projection
     # Reshape hidden state to [B, NH, 1, HD]

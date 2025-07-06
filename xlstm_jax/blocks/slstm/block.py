@@ -6,13 +6,14 @@ from typing import Optional
 
 import jax.numpy as jnp
 from flax import nnx
+from jax.sharding import Mesh
 
 from ...components.feedforward import FeedForwardConfig
 from ..xlstm_block import xLSTMBlock, xLSTMBlockConfig
 from .layer import sLSTMLayerConfig
 
 
-@dataclass
+@dataclass(unsafe_hash=True, order=True)
 class sLSTMBlockConfig:
     slstm: sLSTMLayerConfig = field(default_factory=sLSTMLayerConfig)
     feedforward: Optional[FeedForwardConfig] = field(default_factory=FeedForwardConfig)
@@ -44,7 +45,14 @@ class sLSTMBlock(xLSTMBlock):
 
     config_class = sLSTMBlockConfig
 
-    def __init__(self, config: sLSTMBlockConfig, *, rngs: nnx.Rngs, dtype=jnp.float32):
+    def __init__(
+        self,
+        config: sLSTMBlockConfig,
+        *,
+        mesh: Mesh,
+        rngs: nnx.Rngs,
+        dtype=jnp.float32,
+    ):
         """Initialize an sLSTM block.
 
         Args:
@@ -60,4 +68,4 @@ class sLSTMBlock(xLSTMBlock):
         )
 
         # Initialize using the parent class constructor
-        super().__init__(config=xlstm_config, rngs=rngs, dtype=dtype)
+        super().__init__(config=xlstm_config, mesh=mesh, rngs=rngs, dtype=dtype)

@@ -3,13 +3,12 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 from jax import lax
+from jax.sharding import Mesh
 
 from ..config import MoxEConfig
 from ..ops import (
-    auxiliary_load_balancing_loss,
     compute_entropy,
     kl_auxiliary_group_loss,
-    router_z_loss,
 )
 from ..output import ConditionedGateOutput, str2modulation_bias
 
@@ -56,7 +55,14 @@ def _group_wise_loss_computation(
 
 
 class BiasConditionedGate(nnx.Module):
-    def __init__(self, config: MoxEConfig, *, rngs: nnx.Rngs, dtype=jnp.float32):
+    def __init__(
+        self,
+        config: MoxEConfig,
+        *,
+        mesh: Mesh,
+        rngs: nnx.Rngs,
+        dtype=jnp.float32,
+    ):
         self.gamma = config.gamma
         self.num_experts = config.num_experts
         self.experts_per_group = self.num_experts // 2
@@ -69,6 +75,16 @@ class BiasConditionedGate(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             rngs=rngs,
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.lecun_normal(),
+                sharding=(None, None),
+                mesh=mesh,
+            ),
+            bias_init=nnx.with_partitioning(
+                nnx.initializers.zeros_init(),
+                sharding=("tp",),
+                mesh=mesh,
+            ),
         )
 
         self.router = nnx.Linear(
@@ -78,6 +94,16 @@ class BiasConditionedGate(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             rngs=rngs,
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.lecun_normal(),
+                sharding=(None, "tp"),
+                mesh=mesh,
+            ),
+            bias_init=nnx.with_partitioning(
+                nnx.initializers.zeros_init(),
+                sharding=("tp",),
+                mesh=mesh,
+            ),
         )
 
         self.modulation_bias_kind = str2modulation_bias(config.modulation_bias)
@@ -90,7 +116,7 @@ class BiasConditionedGate(nnx.Module):
 
     def __call__(
         self,
-        h_t: jnp.ndarray,
+        h_t: jax.Array,
         compute_d_loss: bool = True,
         compute_group_loss: bool = True,
     ):
@@ -109,7 +135,7 @@ class BiasConditionedGate(nnx.Module):
         d_t = jax.nn.sigmoid(self.entropy_predictor(h_t))
 
         # threshold_mask = None  # for observability
-        sigma: jnp.ndarray = lax.switch(
+        sigma: jax.Array = lax.switch(
             self.modulation_bias_kind,
             self._modulation_fns,
             self.gamma,
@@ -136,16 +162,6 @@ class BiasConditionedGate(nnx.Module):
         conditioned_logits = unbiased_logits + flat_bias
         router_probs = jax.nn.softmax(conditioned_logits, axis=-1)
 
-        # -------------- Z-loss and load_balancing_loss ----------------
-        z_loss = router_z_loss(unbiased_logits)
-        load_balancing_loss, expert_load, expert_token_counts = (
-            auxiliary_load_balancing_loss(
-                num_experts=self.num_experts,
-                router_probs=router_probs,
-                top_k=self.top_k,
-            )
-        )
-
         # ------------------- d_loss computation -----------------------
         d_loss, router_entropy, predicted_entropy = lax.cond(
             compute_d_loss,
@@ -171,12 +187,44 @@ class BiasConditionedGate(nnx.Module):
             probabilities=router_probs,
             bias=bias,
             d_t=d_t,
-            z_loss=z_loss,
-            load_balancing_loss=load_balancing_loss,
             router_entropy=router_entropy,
             predicted_entropy=predicted_entropy,
-            expert_load=expert_load,
-            expert_token_counts=expert_token_counts,
             d_loss=d_loss,
             group_loss=group_loss,
         )
+
+
+class StandardMoEGate(nnx.Module):
+    def __init__(
+        self,
+        config: MoxEConfig,
+        *,
+        mesh: Mesh,
+        rngs: nnx.Rngs,
+        dtype=jnp.float32,
+    ):
+        self.num_experts = config.num_experts
+
+        self.router = nnx.Linear(
+            in_features=config.xlstm.embedding_dim,
+            out_features=self.num_experts,
+            use_bias=config.gate_bias,
+            dtype=dtype,
+            param_dtype=dtype,
+            rngs=rngs,
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.lecun_normal(),
+                sharding=(None, "tp"),
+                mesh=mesh,
+            ),
+            bias_init=nnx.with_partitioning(
+                nnx.initializers.zeros_init(),
+                sharding=("tp",),
+                mesh=mesh,
+            ),
+        )
+
+    def __call__(self, h_t: jax.Array):
+        gate_logits = self.router(h_t.reshape(-1, h_t.shape[-1]))
+        # router_probs = jax.nn.softmax(gate_logits)
+        return gate_logits

@@ -13,7 +13,7 @@ import orbax.checkpoint as ocp
 from flax import nnx
 
 
-@dataclass
+@dataclass(unsafe_hash=True, order=True)
 class UpProjConfigMixin:
     proj_factor: float = None  # will be overridden by subclasses
     round_proj_up_dim_up: bool = True

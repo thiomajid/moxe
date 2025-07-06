@@ -5,6 +5,7 @@ import functools
 import math
 import typing as tp
 
+import chex
 import jax
 import jax.numpy as jnp
 from jax import lax
@@ -15,15 +16,15 @@ from jax import lax
     static_argnames=("stabilize_rowwise", "eps"),
 )
 def parallel_stabilized_simple(
-    queries: jnp.ndarray,  # (B, NH, S, DH)
-    keys: jnp.ndarray,  # (B, NH, S, DH)
-    values: jnp.ndarray,  # (B, NH, S, DH)
-    igate_preact: jnp.ndarray,  # (B, NH, S, 1)
-    fgate_preact: jnp.ndarray,  # (B, NH, S, 1)
-    lower_triangular_matrix: tp.Optional[jnp.ndarray] = None,  # (S, S)
+    queries: jax.Array,  # (B, NH, S, DH)
+    keys: jax.Array,  # (B, NH, S, DH)
+    values: jax.Array,  # (B, NH, S, DH)
+    igate_preact: jax.Array,  # (B, NH, S, 1)
+    fgate_preact: jax.Array,  # (B, NH, S, 1)
+    lower_triangular_matrix: tp.Optional[jax.Array] = None,  # (S, S)
     stabilize_rowwise: bool = True,
     eps: float = 1e-6,
-) -> jnp.ndarray:
+) -> jax.Array:
     """This is the mLSTM cell in parallel form.
     This version is stabilized. We control the range of exp() arguments by
     ensuring that they are always smaller than 0.0 by subtracting the maximum.
@@ -43,40 +44,42 @@ def parallel_stabilized_simple(
         h_tilde_state: (B, NH, S, DH)
     """
     B, NH, S, DH = queries.shape
+    _dtype = queries.dtype
+
+    chex.assert_trees_all_equal_shapes(queries, keys, values)
+    chex.assert_shape(igate_preact, (B, NH, S, 1))
+    chex.assert_shape(fgate_preact, (B, NH, S, 1))
 
     # forget gate matrix
     log_fgates = jax.nn.log_sigmoid(fgate_preact)  # (B, NH, S, 1)
-
-    # Create lower triangular matrix if not provided or if S doesn't match
-    # if lower_triangular_matrix is None or S != lower_triangular_matrix.shape[0]:
-    #     ltr = jnp.tril(jnp.ones((S, S), dtype=bool))
-    # else:
-    #     ltr = lower_triangular_matrix
-
     ltr = lax.cond(
         lower_triangular_matrix is None or S != lower_triangular_matrix.shape[0],
-        lambda _: jnp.tril(jnp.ones((S, S), dtype=bool)),
-        lambda _: lower_triangular_matrix,
-        operand=None,
+        lambda: jnp.tril(jnp.ones((S, S), dtype=jnp.bool)),
+        lambda: lower_triangular_matrix,
     )
 
     # Calculate cumulative sum of log forget gates
-    zeros = jnp.zeros((B, NH, 1, 1), dtype=queries.dtype)
     log_fgates_cumsum = jnp.concatenate(
-        [zeros, jnp.cumsum(log_fgates, axis=2)], axis=2
+        [
+            jnp.zeros((B, NH, 1, 1), dtype=_dtype),
+            jnp.cumsum(log_fgates, axis=2),
+        ],
+        axis=2,
     )  # (B, NH, S+1, 1)
 
-    # Repeat cumsum values across the last dimension
-    rep_log_fgates_cumsum = jnp.repeat(
-        log_fgates_cumsum, S + 1, axis=3
-    )  # (B, NH, S+1, S+1)
+    # for each batch/head this is a matrix of shape (S+1, S+1) containing the cumsum of the log forget gate values
+    # in the second dimension (colum dimension). Each row has the same is a copy of the first row.
+    # First entry of each row is zero.
+    # (B, NH, S+1, S+1)
+    rep_log_fgates_cumsum = jnp.repeat(log_fgates_cumsum, S + 1, axis=-1)
 
-    # Compute differences for the log forget gate matrix
-    _log_fg_matrix = rep_log_fgates_cumsum - jnp.transpose(
-        rep_log_fgates_cumsum, (0, 1, 3, 2)
-    )  # (B, NH, S+1, S+1)
+    # now in each row cut off / subtract the forgetgate values of the later timesteps
+    # where col j > row i
+    # (B, NH, S+1, S+1)
+    _log_fg_matrix = rep_log_fgates_cumsum - rep_log_fgates_cumsum.swapaxes(-2, -1)
 
-    # Apply causal mask to the log forget gate matrix
+    # causal masking & selection of the correct submatrix, such that forgetgate at timestep t is not applied
+    # to the input at timestep t
     log_fg_matrix = jnp.where(
         ltr, _log_fg_matrix[:, :, 1:, 1:], -float("inf")
     )  # (B, NH, S, S)
@@ -87,7 +90,6 @@ def parallel_stabilized_simple(
     )  # (B, NH, S, S)
 
     # D matrix stabilization
-    # INFO: can't be jitted because the shapes are different between the two if-clause branches
     if stabilize_rowwise:
         max_log_D = jnp.max(log_D_matrix, axis=-1, keepdims=True)  # (B, NH, S, 1)
     else:
@@ -102,7 +104,7 @@ def parallel_stabilized_simple(
     keys_scaled = keys / math.sqrt(DH)
 
     # Combination matrix C
-    qk_matrix = queries @ jnp.transpose(keys_scaled, (0, 1, 3, 2))  # (B, NH, S, S)
+    qk_matrix = queries @ keys_scaled.swapaxes(-2, -1)  # (B, NH, S, S)
     C_matrix = qk_matrix * D_matrix  # (B, NH, S, S)
 
     # Compute normalizer with numerical stability
@@ -120,16 +122,16 @@ def parallel_stabilized_simple(
 
 @functools.partial(jax.jit, static_argnames=("eps",))
 def recurrent_step_stabilized_simple(
-    c_state: jnp.ndarray,  # (B, NH, DH, DH)
-    n_state: jnp.ndarray,  # (B, NH, DH, 1)
-    m_state: jnp.ndarray,  # (B, NH, 1, 1)
-    q: jnp.ndarray,  # (B, NH, 1, DH)
-    k: jnp.ndarray,  # (B, NH, 1, DH)
-    v: jnp.ndarray,  # (B, NH, 1, DH)
-    igate_preact: jnp.ndarray,  # (B, NH, 1, 1)
-    fgate_preact: jnp.ndarray,  # (B, NH, 1, 1)
+    c_state: jax.Array,  # (B, NH, DH, DH)
+    n_state: jax.Array,  # (B, NH, DH, 1)
+    m_state: jax.Array,  # (B, NH, 1, 1)
+    q: jax.Array,  # (B, NH, 1, DH)
+    k: jax.Array,  # (B, NH, 1, DH)
+    v: jax.Array,  # (B, NH, 1, DH)
+    igate_preact: jax.Array,  # (B, NH, 1, 1)
+    fgate_preact: jax.Array,  # (B, NH, 1, 1)
     eps: float = 1e-6,
-) -> tuple[jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array]]:
     """This is a single step of the mLSTM operation in recurrent form.
 
     Args:
@@ -195,20 +197,18 @@ def recurrent_step_stabilized_simple(
     static_argnames=("chunk_size", "return_last_state", "eps"),
 )
 def chunkwise_simple(
-    queries: jnp.ndarray,  # (B, NH, S, DH)
-    keys: jnp.ndarray,  # (B, NH, S, DH)
-    values: jnp.ndarray,  # (B, NH, S, DH)
-    igate_preact: jnp.ndarray,  # (B, NH, S)
-    fgate_preact: jnp.ndarray,  # (B, NH, S)
-    initial_C: tp.Optional[jnp.ndarray] = None,  # (B, NH, DH, DH)
-    initial_n: tp.Optional[jnp.ndarray] = None,  # (B, NH, DH)
-    initial_m: tp.Optional[jnp.ndarray] = None,  # (B, NH, 1)
+    queries: jax.Array,  # (B, NH, S, DH)
+    keys: jax.Array,  # (B, NH, S, DH)
+    values: jax.Array,  # (B, NH, S, DH)
+    igate_preact: jax.Array,  # (B, NH, S)
+    fgate_preact: jax.Array,  # (B, NH, S)
+    initial_C: tp.Optional[jax.Array] = None,  # (B, NH, DH, DH)
+    initial_n: tp.Optional[jax.Array] = None,  # (B, NH, DH)
+    initial_m: tp.Optional[jax.Array] = None,  # (B, NH, 1)
     chunk_size: int = 64,
     return_last_state: bool = False,
     eps: float = 1e-6,
-) -> tp.Union[
-    jnp.ndarray, tuple[jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]
-]:
+) -> tp.Union[jax.Array, tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array]]]:
     """Chunkwise mLSTM processing for efficient computation.
 
     Args:

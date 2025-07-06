@@ -2,6 +2,7 @@ from copy import deepcopy
 
 import jax.numpy as jnp
 from flax import nnx
+from jax.sharding import Mesh
 
 from xlstm_jax.xlstm_block_stack import xLSTMBlockStack
 
@@ -15,19 +16,11 @@ class mLSTMMoELayer(xLSTMMoELayer):
         self,
         config: MoxEConfig,
         *,
+        mesh: Mesh,
         rngs: nnx.Rngs,
         dtype=jnp.float32,
     ) -> None:
-        super().__init__(config)
-
-        self.gate = nnx.Linear(
-            config.xlstm.embedding_dim,
-            config.num_experts,
-            use_bias=config.gate_bias,
-            dtype=dtype,
-            param_dtype=dtype,
-            rngs=rngs,
-        )
+        super().__init__(config, mesh=mesh, rngs=rngs, dtype=dtype)
 
         # use only mLSTM blocks as a sequence mixer for this kind of layer
         mixer_config = deepcopy(config.xlstm)
@@ -35,6 +28,8 @@ class mLSTMMoELayer(xLSTMMoELayer):
         mixer_config.slstm_at = []
         _block_map = [0, 0]
         mixer_config._block_map = ",".join(map(str, _block_map))
-        self.sequence_mixer = xLSTMBlockStack(mixer_config, rngs=rngs, dtype=dtype)
+        self.sequence_mixer = xLSTMBlockStack(
+            mixer_config, mesh=mesh, rngs=rngs, dtype=dtype
+        )
 
-        self.experts = get_expert_modules(config, rngs=rngs, dtype=dtype)
+        self.experts = get_expert_modules(config, mesh=mesh, rngs=rngs, dtype=dtype)

@@ -1,0 +1,9 @@
+defaults:
+  - _self_
+  - trainer: moxe_trainer
+  - model: demo_moxe
+
+dtype: "float32"
+
+# Checkpoint resumption (optional)
+resume_from_checkpoint: false

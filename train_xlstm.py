@@ -1,48 +1,56 @@
 import functools
 import json
 import logging
+import random
 import shutil
+import time
+import typing as tp
 from dataclasses import asdict
 from pathlib import Path
+from pprint import pprint
 from typing import cast
 
+import grain.python as grain
 import hydra
+import jax
 import jax.numpy as jnp
-import jax.tree_util as jtu
 import optax
 import orbax.checkpoint as ocp
 from einops import rearrange
 from flax import nnx
-from huggingface_hub import create_repo, repo_exists, upload_folder
+from huggingface_hub import create_repo, repo_exists, snapshot_download, upload_folder
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 from transformers import (
     AutoTokenizer,
+    DataCollatorForLanguageModeling,
     HfArgumentParser,
 )
 
-from moxe import MoxEConfig, MoxEForCausalLM
-from moxe._trainer.arguments import CustomArgs
-from moxe._trainer.data import create_dataloaders
-from moxe.observability import RouterMetricsWriter
-from moxe.output import MoxEForwardPassOutput
+from moxe.inference import GenerationCarry, generate_sequence_scan
+from moxe.tensorboard import TensorBoardLogger
+from moxe.training.arguments import CustomArgs
+from moxe.training.data import DataCollatatorTransform, create_dataloaders
+from moxe.training.helpers import apply_gradients, compute_training_steps
+from moxe.utils.array import create_mesh, log_node_devices_stats
+from moxe.utils.modules import (
+    checkpoint_post_eval,
+    count_parameters,
+    load_sharded_checkpoint_state,
+)
+from moxe.utils.parser import parse_xlstm_config_dict
+from xlstm_jax import xLSTMLMModel, xLSTMLMModelConfig
 from xlstm_jax.utils import str2dtype
 
 
-def loss_fn(
-    model: MoxEForCausalLM,
-    batch: tuple[jnp.ndarray, ...],
-    z_loss_coef: float,
-    load_balancing_loss_coef: float,
-    d_loss_coef: float = 0.0,
-    group_loss_coef: float = 0.0,
-):
+def loss_fn(model: xLSTMLMModel, batch: tuple[jax.Array, jax.Array]):
     """Compute the loss for a batch of data."""
     input_ids, labels = batch
-    output = model(input_ids, return_layers_outputs=True)
+    output = model(input_ids)
 
     # shape: [batch, seq, vocab] -> [batch * (seq-1), vocab]
-    shifted_logits = rearrange(output.logits[..., :-1, :], "b s v -> (b s) v")
+    shifted_logits = rearrange(output[..., :-1, :], "b s v -> (b s) v")
 
     # shape: [batch, seq] -> [batch * (seq-1)]
     shifted_labels = rearrange(labels[..., 1:], "b s -> (b s)")
@@ -52,168 +60,58 @@ def loss_fn(
         logits=shifted_logits, labels=shifted_labels
     ).mean()
 
-    total_loss = ce_loss
-
-    # -------------- Z-loss computation --------------------------------
-
-    per_layer_z_loss_tree = jtu.tree_map(
-        f=lambda layer: layer.z_loss,
-        tree=output.layers_outputs,
-    )
-
-    # accumulate z_loss per-layer
-    z_loss = jtu.tree_reduce(
-        jnp.add,
-        tree=per_layer_z_loss_tree,
-        initializer=jnp.zeros(()),
-    ).mean()
-
-    # -------------- LOAD BALANCING LOSS computation ---------------------
-    per_layer_load_balancing_loss = jtu.tree_map(
-        f=lambda layer: layer.load_balancing_loss,
-        tree=output.layers_outputs,
-    )
-
-    # reduction step
-    load_balancing_loss = jtu.tree_reduce(
-        jnp.add,
-        tree=per_layer_load_balancing_loss,
-        initializer=jnp.zeros(()),
-    ).mean()
-
-    # ---------------------- DIFFICULTY LOSS ------------------------
-    per_layer_d_loss = jtu.tree_map(
-        f=lambda layer: layer.conditioned_output.d_loss,
-        tree=output.layers_outputs,
-    )
-
-    # reduction step
-    d_loss = jtu.tree_reduce(
-        jnp.add,
-        tree=per_layer_d_loss,
-        initializer=jnp.zeros(()),
-    )
-
-    total_loss = total_loss + d_loss_coef * d_loss
-
-    # ------------------------ GROUP LOSS -----------------------------
-    per_layer_group_loss = jtu.tree_map(
-        f=lambda layer: layer.conditioned_output.group_loss,
-        tree=output.layers_outputs,
-    )
-
-    group_loss = jtu.tree_reduce(
-        jnp.add,
-        tree=per_layer_group_loss,
-        initializer=jnp.zeros(()),
-    ).mean()
-
-    loss = (
-        total_loss
-        + z_loss_coef * z_loss
-        + load_balancing_loss_coef * load_balancing_loss
-        + d_loss_coef * d_loss
-        + group_loss_coef * group_loss
-    )
-
-    return loss, MoxEForwardPassOutput(
-        model=output,
-        ce_loss=ce_loss,
-        z_loss=z_loss,
-        load_balance_loss=load_balancing_loss,
-        d_loss=d_loss,
-        group_loss=group_loss,
-    )
-
-
-@functools.partial(
-    nnx.jit,
-    static_argnames=(
-        "z_loss_coef",
-        "load_balancing_loss_coef",
-        "d_loss_coef",
-        "group_loss_coef",
-    ),
-)
-def compute_grads_and_metrics(
-    model: MoxEForCausalLM,
-    metrics: nnx.MultiMetric,
-    batch: tuple[jnp.ndarray, ...],
-    z_loss_coef: float,
-    load_balancing_loss_coef: float,
-    d_loss_coef: float = 0.0,
-    group_loss_coef: float = 0.0,
-):
-    """Computes gradients, loss, and updates metrics for a single micro-batch."""
-    grad_fn = nnx.value_and_grad(loss_fn, has_aux=True, allow_int=True)
-    (loss, output), grads = grad_fn(
-        model,
-        batch,
-        z_loss_coef=z_loss_coef,
-        load_balancing_loss_coef=load_balancing_loss_coef,
-        d_loss_coef=d_loss_coef,
-        group_loss_coef=group_loss_coef,
-    )
-
-    output = cast(MoxEForwardPassOutput, output)
-
-    # Calculate metrics for this micro-batch
-    perplexity = jnp.exp(output.ce_loss)
-    grad_norm = optax.global_norm(grads)  # Calculate gradient norm
-    metrics.update(
-        loss=loss,
-        ce_loss=output.ce_loss,
-        perplexity=perplexity,
-        z_loss=output.z_loss,
-        load_balancing_loss=output.load_balance_loss,
-        d_loss=output.d_loss,
-        group_loss=output.group_loss,
-        grad_norm=grad_norm,
-    )
-
-    return loss, grads, grad_norm, output
+    return ce_loss
 
 
 @nnx.jit
-def apply_gradients(
-    optimizer: nnx.Optimizer,
-    grads: nnx.State,  # Gradients are pytrees matching model state structure
+def compute_grads_and_metrics(
+    model: xLSTMLMModel,
+    metrics: nnx.MultiMetric,
+    batch: tuple[jax.Array, jax.Array],
 ):
-    """Apply accumulated gradients to the model using the optimizer."""
-    optimizer.update(grads)
+    """Computes gradients, loss, and updates metrics for a single micro-batch."""
+    grad_fn = nnx.value_and_grad(loss_fn)
+    loss, grads = grad_fn(model, batch)
+
+    # Calculate metrics for this micro-batch
+    perplexity = jnp.exp(loss)
+    grad_norm = optax.global_norm(grads)  # Calculate gradient norm
+    metrics.update(loss=loss, perplexity=perplexity, grad_norm=grad_norm)
+
+    return loss, grads, grad_norm
+
+
+@nnx.jit
+def eval_step(
+    model: xLSTMLMModel,
+    metrics: nnx.MultiMetric,
+    batch: tuple[jax.Array, jax.Array],
+):
+    """Perform a single evaluation step."""
+    loss = loss_fn(model, batch)
+    perplexity = jnp.exp(loss)
+    metrics.update(loss=loss, perplexity=perplexity)
 
 
 @functools.partial(
     nnx.jit,
-    static_argnames=(
-        "z_loss_coef",
-        "load_balancing_loss_coef",
-        "d_loss_coef",
-        "group_loss_coef",
-    ),
+    static_argnames=("config_fn", "seed", "mesh", "dtype"),
 )
-def eval_step(
-    model: MoxEForCausalLM,
-    metrics: nnx.MultiMetric,
-    batch: tuple[jnp.ndarray, ...],
-    z_loss_coef: float = 0.0,
-    load_balancing_loss_coef: float = 0.0,
-    d_loss_coef: float = 0.0,
-    group_loss_coef: float = 0.0,
+def _create_sharded_model(
+    config_fn: tp.Callable[[], xLSTMLMModelConfig],
+    seed: int,
+    mesh: Mesh,
+    dtype=jnp.float32,
 ):
-    """Perform a single evaluation step."""
-    loss, output = loss_fn(
-        model,
-        batch,
-        z_loss_coef=z_loss_coef,
-        load_balancing_loss_coef=load_balancing_loss_coef,
-        d_loss_coef=d_loss_coef,
-        group_loss_coef=group_loss_coef,
-    )
+    rngs = nnx.Rngs(seed)
+    config = config_fn()
+    model = xLSTMLMModel(config, mesh=mesh, rngs=rngs, dtype=dtype)
+    state = nnx.state(model)
+    pspecs = nnx.get_partition_spec(state)
+    sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+    nnx.update(model, sharded_state)
 
-    perplexity = jnp.exp(output.ce_loss)
-    # Note: grad_norm is not computed during evaluation
-    metrics.update(loss=loss, perplexity=perplexity)
+    return model
 
 
 @hydra.main(config_path="./configs", config_name="config", version_base="1.1")
@@ -224,17 +122,19 @@ def main(cfg: DictConfig):
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
     logger = logging.getLogger(__name__)
-    logger.info("Starting training...")
+    logger.info("Starting xLSTM language model training...")
 
     parser = HfArgumentParser(CustomArgs)
 
     # Load trainer arguments from YAML file
     args = parser.parse_dict(OmegaConf.to_container(cfg["trainer"], resolve=True))[0]
     args = cast(CustomArgs, args)
-    if not hasattr(args, "warmup_steps"):
-        args.warmup_steps = 500  # Default value if not provided
+
+    # Set default warmup_ratio if not provided
+    if not hasattr(args, "warmup_ratio"):
+        args.warmup_ratio = 0.2
         logger.warning(
-            f"args.warmup_steps not found in config, defaulting to {args.warmup_steps}"
+            f"warmup_ratio not found in config, defaulting to {args.warmup_ratio}"
         )
 
     logger.info("Loading tokenizer...")
@@ -250,112 +150,194 @@ def main(cfg: DictConfig):
         tokenizer.pad_token = tokenizer.eos_token
         logger.warning("Padding token set to EOS token.")
 
-    config_dict = OmegaConf.to_container(cfg["model"], resolve=True)
+    if tokenizer.padding_side == "right":
+        tokenizer.padding_side = "left"
+        logger.warning("Changed the tokenizer's padding_side from left to right")
+
+    config_dict = OmegaConf.to_container(cfg["model"]["xlstm"], resolve=True)
     config_dict["vocab_size"] = tokenizer.vocab_size
-    print(config_dict)
-    config = MoxEConfig.from_dict(config_dict)
+    config_dict["pad_token_id"] = tokenizer.pad_token_id
+    pprint(config_dict)
+    config = parse_xlstm_config_dict(config_dict)
     config.pad_token_id = tokenizer.pad_token_id
+
+    log_node_devices_stats(logger)
 
     # Model instance
     dtype_str = cfg["dtype"]
-    logger.info(f"Creating MoxE model with dtype={dtype_str}...")
+    logger.info(f"Creating xLSTM model with dtype={dtype_str}...")
     dtype = str2dtype(dtype_str)
-    rngs = nnx.Rngs(args.seed)
-    model = MoxEForCausalLM(config, rngs=rngs, dtype=dtype)
 
-    train_loader, eval_loader = create_dataloaders(logger, args, tokenizer, config)
+    mesh_shape = tuple(args.mesh_shape) if hasattr(args, "mesh_shape") else (1,)
+    axis_names = tuple(args.axis_names) if hasattr(args, "axis_names") else ("dp",)
+    mesh = create_mesh(mesh_shape=mesh_shape, axis_names=axis_names)
 
-    # Calculate total training steps for the scheduler
-    num_train_micro_batches = (
-        len(train_loader._data_source) // args.per_device_train_batch_size
-    )
-    if args.gradient_accumulation_steps <= 0:
-        raise ValueError("gradient_accumulation_steps must be positive")
-    steps_per_epoch = num_train_micro_batches // args.gradient_accumulation_steps
-    if steps_per_epoch == 0:
-        logger.warning(
-            f"Number of micro-batches ({num_train_micro_batches}) is less than gradient_accumulation_steps ({args.gradient_accumulation_steps}). Effective steps per epoch is 0. Consider reducing accumulation steps or increasing dataset size."
+    model: tp.Optional[xLSTMLMModel] = None
+    with mesh:
+        model = _create_sharded_model(
+            config_fn=lambda: config,
+            seed=args.seed,
+            mesh=mesh,
+            dtype=dtype,
         )
-    max_steps = args.num_train_epochs * steps_per_epoch
 
-    # Calculate warmup steps based on warmup_ratio
-    warmup_steps = int(args.warmup_ratio * max_steps)
-    logger.info(
-        f"Calculated warmup steps: {warmup_steps} ({args.warmup_ratio=}, {max_steps=})"
+    logger.info(f"Model parameters: {count_parameters(model)}")
+
+    log_node_devices_stats(logger)
+
+    # Handle checkpoint resumption if configured
+    if cfg.get("resume_from_checkpoint", False):
+        logger.info(f"Resuming from checkpoint from {cfg['checkpoint_hub_url']}")
+        save_dir = Path(cfg["checkpoint_save_dir"])
+
+        if not save_dir.exists():
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+        snapshot_download(
+            repo_id=cfg["checkpoint_hub_url"],
+            local_dir=save_dir,
+            token=args.hub_token,
+            revision=cfg.get("checkpoint_revision", "main"),
+        )
+
+        ckpt_path = save_dir / "model_checkpoint/default"
+        ckpt_path = ckpt_path.absolute()
+
+        load_sharded_checkpoint_state(
+            model=model,
+            checkpoint_path=ckpt_path,
+            mesh=mesh,
+        )
+
+        logger.info("loaded checkpoint state")
+
+    logger.info("Setting model in training mode")
+    model.train()
+
+    train_data_ops = [
+        grain.Batch(args.per_device_train_batch_size, drop_remainder=True),
+        DataCollatatorTransform(
+            target_columns=["input_ids", "labels", "attention_mask"],
+            collator=DataCollatorForLanguageModeling(
+                tokenizer=tokenizer,
+                mlm=False,
+                return_tensors="np",
+            ),
+        ),
+    ]
+
+    eval_data_ops = [
+        grain.Batch(args.per_device_eval_batch_size, drop_remainder=True),
+        DataCollatatorTransform(
+            target_columns=["input_ids", "labels", "attention_mask"],
+            collator=DataCollatorForLanguageModeling(
+                tokenizer=tokenizer,
+                mlm=False,
+                return_tensors="np",
+            ),
+        ),
+    ]
+
+    train_loader, eval_loader = create_dataloaders(
+        logger=logger,
+        args=args,
+        tokenizer=tokenizer,
+        max_seq_length=config.context_length,
+        train_data_ops=train_data_ops,
+        eval_data_ops=eval_data_ops,
     )
 
-    # Define the learning rate schedule
-    lr_schedule = optax.warmup_cosine_decay_schedule(
+    # Setup the training loop
+    num_train_samples = len(train_loader._data_source)
+    num_eval_samples = len(eval_loader._data_source)
+
+    logger.info(f"Dataset sizes - Train: {num_train_samples}, Eval: {num_eval_samples}")
+    steps_dict = compute_training_steps(
+        args, num_train_samples, num_eval_samples, logger
+    )
+    max_steps = steps_dict["max_steps"]
+    max_optimizer_steps = steps_dict["max_optimizer_steps"]
+
+    # Set default warmup_ratio if not provided
+    if not hasattr(args, "warmup_ratio"):
+        args.warmup_ratio = 0.2
+        logger.warning(
+            f"warmup_ratio not found in config, defaulting to {args.warmup_ratio}"
+        )
+
+    # Use optimizer steps for learning rate schedule (not micro-batch steps)
+    warmup_steps = int(args.warmup_ratio * max_optimizer_steps)
+    logger.info(
+        f"Calculated warmup steps: {warmup_steps} ({args.warmup_ratio=}, max_optimizer_steps={max_optimizer_steps})"
+    )
+
+    # Create warmup cosine learning rate schedule
+    cosine_schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
         peak_value=args.learning_rate,
-        warmup_steps=warmup_steps,  # Use calculated warmup_steps
-        decay_steps=max_steps - warmup_steps,
-        end_value=args.learning_rate * 0.1,  # Example: decay to 10% of peak lr
+        warmup_steps=warmup_steps,
+        decay_steps=int(max_optimizer_steps - warmup_steps),
+        end_value=args.learning_rate * 0.2,
     )
 
-    # Note: If using gradient clipping, apply it *before* adamw
+    logger.info(
+        f"Using warmup cosine learning rate schedule: 0.0 -> {args.learning_rate} -> {args.learning_rate * 0.2} over {max_optimizer_steps} optimizer steps (warmup: {warmup_steps} steps)"
+    )
+
+    # Optimizer
     optimizer_def = optax.chain(
-        # optax.clip_by_global_norm(args.max_grad_norm), # Uncomment if needed
         optax.adamw(
-            learning_rate=lr_schedule,  # Use the scheduler here
+            learning_rate=cosine_schedule,
             b1=args.adam_beta1,
             b2=args.adam_beta2,
             weight_decay=args.weight_decay,
         ),
     )
+
+    optimizer_def = optax.MultiSteps(
+        optimizer_def,
+        every_k_schedule=args.gradient_accumulation_steps,
+    )
+
     optimizer = nnx.Optimizer(model, optimizer_def)
 
-    # Add grad_norm to metrics
-    metrics = nnx.MultiMetric(
+    # Metrics
+    train_metrics = nnx.MultiMetric(
         loss=nnx.metrics.Average("loss"),
         perplexity=nnx.metrics.Average("perplexity"),
-        grad_norm=nnx.metrics.Average(
-            "grad_norm"
-        ),  # Track average grad norm over accumulation steps
+        grad_norm=nnx.metrics.Average("grad_norm"),
     )
+
     eval_metrics = nnx.MultiMetric(
         loss=nnx.metrics.Average("loss"),
         perplexity=nnx.metrics.Average("perplexity"),
     )
 
-    history: dict[str, list[dict[str, float]]] = {
-        "train_loss": [],
-        "train_perplexity": [],
-        "train_grad_norm": [],
-        "learning_rate": [],
-        "eval_loss": [],
-        "eval_perplexity": [],
-    }
+    # TensorBoard logger
+    tb_logger = TensorBoardLogger(log_dir=args.logging_dir, name="train")
 
-    metrics_writer = RouterMetricsWriter(log_dir=args.output_dir)
-
-    # checkpoint manager
+    # Checkpoint manager
     ckpt_dir = Path(args.logging_dir).absolute()
-    ckpt_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # Options for CheckpointManager: keep best 3 based on eval_perplexity
-    # Lower perplexity is better.
+    BEST_METRIC_KEY: tp.Final[str] = "eval_loss"
     options = ocp.CheckpointManagerOptions(
         max_to_keep=3,
-        best_fn=lambda metrics: metrics["eval_perplexity"],
+        best_fn=lambda metrics: metrics[BEST_METRIC_KEY],
         best_mode="min",
         create=True,
     )
-    # The PyTreeCheckpointer handles the actual saving/loading of the PyTree (model state)
-    # The CheckpointManager uses the checkpointer to save/restore and manages multiple checkpoints
+
     manager = ocp.CheckpointManager(
         ckpt_dir,
-        ocp.PyTreeCheckpointer(),  # Using a PyTreeCheckpointer
+        checkpointers=ocp.PyTreeCheckpointer(),
         options=options,
     )
 
-    # Start training with progress bar being updated and gradient accumulation
-    # if needed and descriptive messages
-    global_step = 0  # Tracks optimizer steps
-    accumulated_grads = None
-    latest_eval_metrics_for_ckpt = {
-        "eval_perplexity": float("inf")
-    }  # Initialize with a high value for 'min' mode
+    # Training loop setup
+    global_step = 0
+    global_optimizer_step = 0
+    latest_eval_metrics_for_ckpt = {BEST_METRIC_KEY: float("inf")}
 
     logger.info("Starting training loop...")
     logger.info(f"Num Epochs = {args.num_train_epochs}")
@@ -365,33 +347,40 @@ def main(cfg: DictConfig):
         f"Effective Batch size = {args.per_device_train_batch_size * args.gradient_accumulation_steps}"
     )
     logger.info(
-        f"Total micro-batches = {num_train_micro_batches * args.num_train_epochs}"
+        f"Total batches per epoch: Train - {steps_dict['train_batches']} && Eval - {steps_dict['eval_batches']}"
     )
-    logger.info(f"Total optimization steps = {max_steps}")
-    logger.info(f"Warmup steps = {args.warmup_steps}")
+    logger.info(f"Total steps = {max_steps}")
+    logger.info(f"Total optimizer steps = {max_optimizer_steps}")
 
-    # --- Training Loop ---
-    with tqdm(total=max_steps, desc="Training loop") as pbar:
-        for epoch in range(args.num_train_epochs):
-            logger.info(f"Starting Epoch {epoch + 1}/{args.num_train_epochs}")
-            metrics.reset()  # Reset train metrics at the start of each epoch
-            # Update outer pbar description for the current epoch
-            pbar.set_description(
-                desc=f"Training loop - Epoch {epoch + 1}/{args.num_train_epochs}"
-            )
+    # Start timing
+    training_start_time = time.perf_counter()
+    epoch_durations = []
 
-            # Inner loop for micro-batches with its own tqdm, set leave=False
-            for micro_step, batch in enumerate(
-                tqdm(
-                    train_loader,
-                    desc=f"Epoch {epoch + 1} Micro-batches",
-                    leave=False,  # Make the inner bar disappear after completion
-                )
-            ):
-                # print("Batch type ²---->", type(batch))
-                # print(batch)
-                # print(batch["input_ids"].shape)
-                # raise SystemExit(0)
+    # Training Loop
+    DATA_SHARDING = NamedSharding(
+        create_mesh(mesh_shape, axis_names),
+        spec=PartitionSpec("dp", None),
+    )
+
+    GENERATION_SAMPLES = ["Once upon a time", "There was a girl", "Next to the tree"]
+    MAX_NEW_TOKENS = 300
+    GREEDY = False
+    TEMPERATURE = 0.85
+
+    for epoch in range(args.num_train_epochs):
+        epoch_start_time = time.perf_counter()
+        logger.info(f"Starting Epoch {epoch + 1}/{args.num_train_epochs}")
+        train_metrics.reset()
+
+        epoch_desc = f"Epoch {epoch + 1}/{args.num_train_epochs}"
+        with tqdm(
+            total=steps_dict["steps_per_epoch"],
+            desc=epoch_desc,
+            leave=True,
+        ) as pbar:
+            pbar.set_description(epoch_desc)
+            for step, batch in enumerate(train_loader):
+                global_step += 1  # Count every batch as a step
 
                 # Prepare batch - Squeeze on axis 0 because Grain creates an additional axis
                 input_ids = jnp.array(batch["input_ids"])
@@ -403,194 +392,235 @@ def main(cfg: DictConfig):
                 if labels.ndim == 3 and labels.shape[0] == 1:
                     labels = labels.squeeze(0)
 
+                # Apply data sharding
+                input_ids = jax.device_put(input_ids, DATA_SHARDING)
+                labels = jax.device_put(labels, DATA_SHARDING)
+
                 _batch = (input_ids, labels)
 
-                # Compute gradients for the micro-batch and update metrics
-                loss, grads, grad_norm, output = compute_grads_and_metrics(
+                # Compute gradients and metrics
+                loss, grads, grad_norm = compute_grads_and_metrics(
                     model,
-                    metrics,
+                    train_metrics,
                     _batch,
-                    z_loss_coef=args.z_loss_coef,
-                    load_balancing_loss_coef=args.load_balancing_loss_coef,
-                    d_loss_coef=args.d_loss_coef,
-                    group_loss_coef=args.group_loss_coef,
                 )
 
-                # Initialize or accumulate gradients
-                if accumulated_grads is None:
-                    accumulated_grads = jtu.tree_map(jnp.zeros_like, grads)
+                apply_gradients(optimizer, grads)
 
-                accumulated_grads = jtu.tree_map(
-                    lambda acc, g: acc + g, accumulated_grads, grads
-                )
+                # Check if it's time for optimizer step
+                is_update_step = (step + 1) % args.gradient_accumulation_steps == 0
+                if is_update_step:
+                    global_optimizer_step += 1
 
-                # Check if it's time for an optimizer step
-                is_update_step = (
-                    micro_step + 1
-                ) % args.gradient_accumulation_steps == 0
-                is_last_micro_batch = (micro_step + 1) == num_train_micro_batches
+                    # Log learning rate
+                    current_lr = cosine_schedule(global_optimizer_step)
+                    tb_logger.log_learning_rate(current_lr, global_optimizer_step)
 
-                if is_update_step or is_last_micro_batch:
-                    global_step += 1
-                    pbar.update(1)
+                # Logging
+                if global_step % args.logging_steps == 0:
+                    computed_metrics = train_metrics.compute()
 
-                    # --- Apply Gradients ---
-                    # Optional: Scale accumulated gradients
-                    scaled_grads = jtu.tree_map(
-                        lambda g: g / args.gradient_accumulation_steps,
-                        accumulated_grads,
+                    # Log metrics to TensorBoard
+                    for metric, value in computed_metrics.items():
+                        tb_logger.log_scalar(f"train/{metric}", value, global_step)
+
+                    train_metrics.reset()
+
+                # Update progress bar
+                current_lr = cosine_schedule(global_optimizer_step)
+                postfix_data = {
+                    "step": f"{global_step}/{max_steps}",
+                    "opt_step": f"{global_optimizer_step}/{max_optimizer_steps}",
+                    "lr": f"{current_lr:.2e}",
+                    "loss": f"{loss.item():.6f}",
+                    "grad_norm": f"{grad_norm.item():.4f}",
+                }
+
+                # Add best metrics
+                if (
+                    BEST_METRIC_KEY in latest_eval_metrics_for_ckpt
+                    and latest_eval_metrics_for_ckpt[BEST_METRIC_KEY] != float("inf")
+                ):
+                    postfix_data["best_loss"] = (
+                        f"{latest_eval_metrics_for_ckpt[BEST_METRIC_KEY]:.6f}"
                     )
 
-                    metrics_writer.log_individual_scalars(
-                        global_step=global_step,
-                        scalars={
-                            "train/grad_norm": grad_norm,
-                            "train/learning_rate": lr_schedule(global_step),
-                        },
-                    )
-
-                    # Apply the gradients
-                    apply_gradients(optimizer, scaled_grads)
-
-                    # Reset accumulated gradients
-                    accumulated_grads = jtu.tree_map(jnp.zeros_like, accumulated_grads)
-
-                    # --- Logging ---
-                    if global_step % args.logging_steps == 0:
-                        computed_metrics = metrics.compute()
-                        current_lr = lr_schedule(global_step)  # Get current LR
-                        for metric, value in computed_metrics.items():
-                            history[f"train_{metric}"].append(
-                                {
-                                    "step": global_step,
-                                    "value": value.item(),
-                                }
-                            )
-                        # Log learning rate
-                        history["learning_rate"].append(
-                            {
-                                "step": global_step,
-                                "value": current_lr.item(),  # Log the actual LR
-                            }
-                        )
-
-                        # Update progress bar description
-                        log_data = {
-                            f"train_{k}": f"{v.item():.4f}"
-                            for k, v in computed_metrics.items()
-                        }
-                        log_data["lr"] = f"{current_lr.item():.2e}"  # Show current LR
-                        pbar.set_postfix(log_data)
-                        pbar.refresh()
-
-                        # write to tensorboard
-                        metrics_writer.log_moe_metrics(
-                            global_step=global_step, output=output
-                        )
-
-                        # Reset metrics after logging for the next accumulation cycle
-                        metrics.reset()
-
-                    # --- Saving ---
-                    if global_step % args.save_steps == 0:
-                        state = nnx.state(model)  # Get model state
-                        # Save with the manager, providing the current global_step and latest eval metrics
-                        # The manager will decide if this checkpoint is among the top 3
-                        manager.save(
-                            global_step,
-                            args=ocp.args.PyTreeSave(state),
-                            metrics=latest_eval_metrics_for_ckpt,
-                        )
-                        manager.wait_until_finished()  # Ensure saving completes before proceeding
-                        logger.info(
-                            f"Checkpoint saved at step {global_step} with metrics {latest_eval_metrics_for_ckpt}"
-                        )
-
-                    # Break if max_steps reached (e.g., if last micro batch caused an update)
-                    if global_step >= max_steps:
-                        break
-
-            # Break outer loop if max_steps reached
-            if global_step >= max_steps:
-                logger.info(f"Reached max_steps ({max_steps}). Finishing training.")
-                break
+                current_desc = f"Epoch {epoch + 1}/{args.num_train_epochs} (Step {global_step}/{max_steps}, Opt {global_optimizer_step}/{max_optimizer_steps})"
+                pbar.set_description(current_desc)
+                pbar.set_postfix(postfix_data)
+                pbar.update(1)
 
             # --- Evaluation after each epoch ---
-            logger.info(f"Starting evaluation after epoch {epoch + 1}...")
-            eval_metrics.reset()
+        eval_start_time = time.perf_counter()
+        logger.info(f"Starting evaluation after epoch {epoch + 1}...")
+        eval_metrics.reset()
+
+        eval_batch_count = 0
+        eval_data_available = True
+
+        try:
             for batch in tqdm(
                 eval_loader,
                 desc=f"Evaluating Epoch {epoch + 1}",
                 leave=False,
             ):
-                # Prepare batch - Squeeze on axis 0 if Grain creates an additional axis
-                input_ids = jnp.array(batch["input_ids"])
-                labels = jnp.array(batch["labels"], dtype=jnp.int32)
+                eval_batch_count += 1
+            input_ids = jnp.array(batch["input_ids"])
+            labels = jnp.array(batch["labels"], dtype=jnp.int32)
 
-                # Assuming eval_loader might also produce an extra leading dimension like train_loader
-                if input_ids.ndim == 3 and input_ids.shape[0] == 1:
-                    input_ids = input_ids.squeeze(0)
-                if (
-                    labels.ndim == 3 and labels.shape[0] == 1
-                ):  # Squeeze labels if they also have extra dim
-                    labels = labels.squeeze(0)
+            if input_ids.ndim == 3 and input_ids.shape[0] == 1:
+                input_ids = input_ids.squeeze(0)
 
-                _batch = (input_ids, labels)
-                eval_step(
-                    model=model, metrics=eval_metrics, batch=_batch
-                )  # Uses default 0.0 for aux loss coeffs
+            if labels.ndim == 3 and labels.shape[0] == 1:
+                labels = labels.squeeze(0)
 
-            computed_eval_metrics = eval_metrics.compute()
+            # Apply data sharding
+            input_ids = jax.device_put(input_ids, DATA_SHARDING)
+            labels = jax.device_put(labels, DATA_SHARDING)
+            _batch = (input_ids, labels)
 
-            # Update the metric used for checkpoint manager ranking
-            if "perplexity" in computed_eval_metrics:
-                current_eval_perplexity = float(computed_eval_metrics["perplexity"])
-                latest_eval_metrics_for_ckpt = {
-                    "eval_perplexity": current_eval_perplexity
-                }
-                logger.info(
-                    f"Epoch {epoch + 1} evaluation: Perplexity = {current_eval_perplexity:.4f}"
-                )
-            elif (
-                "loss" in computed_eval_metrics
-            ):  # Fallback if perplexity is not available
-                current_eval_loss = float(computed_eval_metrics["loss"])
-                latest_eval_metrics_for_ckpt = {
-                    "eval_perplexity": current_eval_loss
-                }  # Store loss under expected key
-                logger.info(
-                    f"Epoch {epoch + 1} evaluation: Loss = {current_eval_loss:.4f} (used as perplexity for ranking)"
-                )
-            else:
-                logger.warning(
-                    "Neither perplexity nor loss found in evaluation metrics. Checkpoint ranking might not be effective."
-                )
+            eval_step(model=model, metrics=eval_metrics, batch=_batch)
+        except Exception as e:
+            logger.error(f"Error during evaluation: {e}")
+            eval_data_available = False
 
-            for metric, value in computed_eval_metrics.items():
-                history[f"eval_{metric}"].append(
-                    {
-                        "step": global_step,  # Log eval metrics against the last global step of the epoch
-                        "value": value.item(),
-                    }
-                )
+        logger.info(f"Processed {eval_batch_count} evaluation batches")
 
-            # Update progress bar description with eval metrics
-            eval_log_data = {
-                f"eval_{k}": f"{v.item():.4f}" for k, v in computed_eval_metrics.items()
-            }
-            pbar.set_postfix(eval_log_data)
-            pbar.refresh()
+        if eval_batch_count > 0 and eval_data_available:
+            checkpoint_post_eval(
+                logger=logger,
+                model=model,
+                metrics=eval_metrics,
+                tb_logger=tb_logger,
+                best_metric_key=BEST_METRIC_KEY,
+                checkpoint_manager=manager,
+                global_step=global_step,
+                epoch=epoch,
+            )
+
+            # Generate some text
+            choosen_prompt = random.choice(GENERATION_SAMPLES)
+            input_ids = tokenizer(choosen_prompt, return_tensors="jax", padding=True)[
+                "input_ids"
+            ]
+
+            batch_size = input_ids.shape[0]
+            initial_len = input_ids.shape[1]
+            total_length = initial_len + MAX_NEW_TOKENS
+            full_x_init = jnp.zeros((batch_size, total_length), dtype=jnp.int32)
+            full_x_init = full_x_init.at[:, :initial_len].set(input_ids)
+            # full_x_init = jax.device_put(full_x_init, DATA_SHARDING)
+            key = jax.random.key(123 + epoch)
+            initial_carry: GenerationCarry = (
+                full_x_init,
+                initial_len,
+                key,
+            )
+
+            sequences = generate_sequence_scan(
+                model,
+                initial_carry,
+                max_new_tokens=MAX_NEW_TOKENS,
+                vocab_size=config.vocab_size,
+                temperature=TEMPERATURE,
+                greedy=GREEDY,
+            )
+
+            sequences = tokenizer.batch_decode(sequences)
+            for seq in sequences:
+                tb_logger.writer.text("train/generation", seq, step=global_step)
+
+        else:
+            logger.warning(
+                f"No evaluation data processed for epoch {epoch + 1}. Eval loader might be empty or misconfigured."
+            )
+
+        # Record evaluation duration and log to TensorBoard
+        eval_end_time = time.perf_counter()
+        eval_duration = eval_end_time - eval_start_time
+        tb_logger.log_scalar("timing/eval_duration", eval_duration, global_step)
+        logger.info(f"Evaluation completed in {eval_duration:.2f} seconds")
+
+        # Record epoch duration and log to TensorBoard
+        epoch_end_time = time.perf_counter()
+        epoch_duration = epoch_end_time - epoch_start_time
+        epoch_durations.append(epoch_duration)
+        tb_logger.log_scalar("timing/epoch_duration", epoch_duration, global_step)
+        logger.info(f"Epoch {epoch + 1} completed in {epoch_duration:.2f} seconds")
 
     logger.info("Training completed.")
 
-    # --- Final Saving and Upload ---
+    # Log final training metrics
+    if train_metrics is not None:
+        try:
+            final_computed_metrics = train_metrics.compute()
+            if final_computed_metrics and any(
+                v.item() != 0 for v in final_computed_metrics.values()
+            ):
+                logger.info(
+                    "Logging final training metrics from last accumulation cycle..."
+                )
+
+                key_metric = "loss"
+                if key_metric in final_computed_metrics:
+                    latest_eval_metrics_for_ckpt = {
+                        BEST_METRIC_KEY: float(final_computed_metrics[key_metric])
+                    }
+
+                # Log final metrics to TensorBoard
+                for metric, value in final_computed_metrics.items():
+                    tb_logger.log_scalar(f"train/{metric}", value, global_step)
+
+                current_lr = cosine_schedule(global_optimizer_step)
+                tb_logger.log_learning_rate(current_lr, global_optimizer_step)
+                logger.info(f"Final learning rate: {current_lr:.2e}")
+        except Exception as e:
+            logger.warning(f"Could not compute final training metrics: {e}")
+
+    # Calculate total training duration and log to TensorBoard
+    training_end_time = time.perf_counter()
+    total_training_duration = training_end_time - training_start_time
+    tb_logger.log_scalar(
+        "timing/total_training_duration", total_training_duration, global_step
+    )
+
+    # Calculate and log timing statistics
+    avg_epoch_duration = (
+        sum(epoch_durations) / len(epoch_durations) if epoch_durations else 0
+    )
+
+    tb_logger.log_scalar("timing/avg_epoch_duration", avg_epoch_duration, global_step)
+
+    logger.info(
+        f"Training completed in {total_training_duration:.2f} seconds ({total_training_duration / 3600:.2f} hours)"
+    )
+    logger.info(f"Average epoch duration: {avg_epoch_duration:.2f} seconds")
+
+    # Close TensorBoard logger
+    tb_logger.close()
+
+    # Final saving and upload
     logger.info("Saving final artifacts...")
     artifacts_dir = Path(args.output_dir)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save metrics history
+    # Copy TensorBoard logs to artifacts directory
+    tb_logs_source = Path(args.logging_dir) / "training"
+    tb_logs_target = artifacts_dir / "tensorboard_logs"
+    if tb_logs_source.exists():
+        shutil.copytree(tb_logs_source, tb_logs_target, dirs_exist_ok=True)
+        logger.info(f"TensorBoard logs copied to {tb_logs_target}")
+
+    # Save training history (keeping minimal data for compatibility)
+    training_summary = {
+        "total_training_duration": total_training_duration,
+        "avg_epoch_duration": avg_epoch_duration,
+        "num_epochs_completed": len(epoch_durations),
+        "global_steps": global_step,
+        "global_optimizer_steps": global_optimizer_step,
+    }
     with open(artifacts_dir / "train_history.json", "w") as f:
-        json.dump(history, f, indent=4)
+        json.dump(training_summary, f, indent=4)
     logger.info(f"Training history saved to {artifacts_dir / 'train_history.json'}")
 
     # Save model config
@@ -598,33 +628,51 @@ def main(cfg: DictConfig):
         json.dump(asdict(config), f, indent=4)
     logger.info(f"Model config saved to {artifacts_dir / 'config.json'}")
 
-    # Ensure the very final model state is considered by the manager.
-    # This will save it with the latest known evaluation metrics.
-    # If this state is one of the best, the manager will keep it.
-    if global_step > 0:  # Ensure some training happened
-        final_model_state = nnx.state(model)
+    # Save trainer config
+    with open(artifacts_dir / "trainer_config.json", "w") as f:
+        trainer_config_dict = asdict(args)
+        if "hub_token" in trainer_config_dict:
+            trainer_config_dict.pop("hub_token")
+        json.dump(trainer_config_dict, f, indent=4)
+    logger.info(f"Trainer config saved to {artifacts_dir / 'trainer_config.json'}")
+
+    # Saving the tokenizer
+    tokenizer.save_pretrained(artifacts_dir)
+
+    # Save timing summary
+    timing_summary = {
+        "total_training_duration_seconds": total_training_duration,
+        "total_training_duration_hours": total_training_duration / 3600,
+        "average_epoch_duration_seconds": avg_epoch_duration,
+        "num_epochs_completed": len(epoch_durations),
+        "num_evaluations_completed": len(epoch_durations),  # One eval per epoch
+    }
+    with open(artifacts_dir / "timing_summary.json", "w") as f:
+        json.dump(timing_summary, f, indent=4)
+    logger.info(f"Timing summary saved to {artifacts_dir / 'timing_summary.json'}")
+
+    # Save final model state
+    if global_step > 0:
+        final_model_state = nnx.state(model, nnx.Param)
         logger.info(
             f"Saving final model state at step {global_step} to be considered by CheckpointManager with metrics {latest_eval_metrics_for_ckpt}."
         )
+
         manager.save(
             global_step,
-            args=ocp.args.StandardSave(final_model_state),
+            final_model_state,
             metrics=latest_eval_metrics_for_ckpt,
         )
-        manager.wait_until_finished()  # Wait for this final save to complete.
+        manager.wait_until_finished()
 
-    # Copy the best checkpoint identified by the manager to the artifacts directory
+    # Copy best checkpoint to artifacts directory
     best_step_to_deploy = manager.best_step()
-
-    target_ckpt_deployment_path = (
-        artifacts_dir / "model_checkpoint"
-    )  # Standard name for the best model
+    target_ckpt_deployment_path = artifacts_dir / "model_checkpoint"
 
     if best_step_to_deploy is not None:
         logger.info(
-            f"Best checkpoint according to CheckpointManager is at step {best_step_to_deploy}."
+            f"Best checkpoint according to CheckpointManager is at step {best_step_to_deploy} (based on {BEST_METRIC_KEY})."
         )
-        # CheckpointManager stores checkpoints in subdirectories named by step, e.g., <ckpt_dir>/<step>/
         source_ckpt_dir = manager.directory / str(best_step_to_deploy)
 
         if source_ckpt_dir.exists():
@@ -633,40 +681,33 @@ def main(cfg: DictConfig):
             )
             if target_ckpt_deployment_path.exists():
                 shutil.rmtree(target_ckpt_deployment_path)
+
+            target_ckpt_deployment_path.mkdir(parents=True, exist_ok=True)
             shutil.copytree(
-                source_ckpt_dir, target_ckpt_deployment_path, dirs_exist_ok=False
+                source_ckpt_dir, target_ckpt_deployment_path, dirs_exist_ok=True
             )
         else:
-            logger.error(
-                f"Best checkpoint directory {source_ckpt_dir} not found. This indicates an issue with CheckpointManager state or file system."
-            )
+            logger.error(f"Best checkpoint directory {source_ckpt_dir} not found.")
     else:
-        logger.warning(
-            "CheckpointManager did not identify a best checkpoint (e.g., no checkpoints saved or metrics always 'inf')."
-        )
-        # Fallback: if no "best" was found by manager, attempt to save the absolute final model state directly.
+        logger.warning("CheckpointManager did not identify a best checkpoint.")
         if global_step > 0:
-            final_model_state = nnx.state(model)
+            final_model_state = nnx.state(model, nnx.Param)
             logger.info(
-                f"Saving current final model state directly to {target_ckpt_deployment_path} as a fallback, as no best checkpoint was identified by manager."
+                f"Saving current final model state directly to {target_ckpt_deployment_path} as a fallback."
             )
             if target_ckpt_deployment_path.exists():
                 shutil.rmtree(target_ckpt_deployment_path)
-            # Use a basic checkpointer for this direct save.
-            ocp.PyTreeCheckpointer().save(
+            target_ckpt_deployment_path.mkdir(parents=True, exist_ok=True)
+            ocp.PyTreeCheckpointHandler().save(
                 target_ckpt_deployment_path,
-                args=ocp.args.StandardSave(final_model_state),
+                final_model_state,
             )
         else:
             logger.error(
-                "No training steps were completed, and no best checkpoint found. Cannot save a model."
+                "No optimizer steps were completed, and no best checkpoint found. Cannot save a model."
             )
 
-    # Save tokenizer
-    tokenizer.save_pretrained(artifacts_dir)
-    logger.info(f"Tokenizer saved to {artifacts_dir}")
-
-    # Push to Hub
+    # Push to Hub if requested
     if args.push_to_hub:
         logger.info(
             f"Pushing artifacts from {artifacts_dir} to Hugging Face Hub repository: {args.hub_model_id}..."
@@ -684,7 +725,9 @@ def main(cfg: DictConfig):
             repo_id=args.hub_model_id,
             folder_path=artifacts_dir,
             token=args.hub_token,
-            commit_message="Training completed",
+            commit_message=cfg.get(
+                "upload_message", "xLSTM language model training completed"
+            ),
         )
         logger.info("Push to Hub completed.")
 

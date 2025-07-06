@@ -12,10 +12,9 @@ from flax import nnx
 from .blocks.mlstm.block import mLSTMBlock, mLSTMBlockConfig
 from .blocks.slstm.block import sLSTMBlock, sLSTMBlockConfig
 from .components.ln import LayerNorm
-from .components.util import Identity
 
 
-@dataclass
+@dataclass(unsafe_hash=True, order=True)
 class xLSTMBlockStackConfig:
     mlstm_block: Optional[mLSTMBlockConfig] = None
     slstm_block: Optional[sLSTMBlockConfig] = None
@@ -92,13 +91,16 @@ class xLSTMBlockStack(nnx.Module):
         self,
         config: xLSTMBlockStackConfig,
         *,
+        mesh: jax.sharding.Mesh,
         rngs: nnx.Rngs,
         dtype=jnp.float32,
     ):
-        self.config = config
-        self.dtype = dtype
-
-        self.blocks = self._create_blocks(config=config, rngs=rngs)
+        self.blocks = self._create_blocks(
+            config=config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+        )
 
         # Create post-blocks normalization layer
         self.post_blocks_norm = (
@@ -107,19 +109,26 @@ class xLSTMBlockStack(nnx.Module):
                 use_bias=False,
                 rngs=rngs,
                 dtype=dtype,
+                mesh=mesh,
             )
             if config.add_post_blocks_norm
             else jax.nn.identity
         )
 
-    def _create_blocks(self, config: xLSTMBlockStackConfig, rngs: nnx.Rngs):
+    def _create_blocks(
+        self,
+        config: xLSTMBlockStackConfig,
+        mesh: jax.sharding.Mesh,
+        rngs: nnx.Rngs,
+        dtype=jnp.float32,
+    ):
         """Create blocks according to the block map in the configuration."""
         blocks: list[mLSTMBlock | sLSTMBlock] = []
 
         for block_idx, block_type_int in enumerate(config.block_map):
             if block_type_int == 0:
                 # Clone configuration to avoid modification issues
-                block_config = deepcopy(self.config.mlstm_block)
+                block_config = deepcopy(config.mlstm_block)
                 if hasattr(block_config, "_block_idx"):
                     block_config._block_idx = block_idx
                     block_config.__post_init__()
@@ -127,13 +136,14 @@ class xLSTMBlockStack(nnx.Module):
                     mLSTMBlock(
                         config=block_config,
                         rngs=rngs,
-                        dtype=self.dtype,
+                        dtype=dtype,
+                        mesh=mesh,
                     )
                 )
 
             elif block_type_int == 1:
                 # Clone configuration to avoid modification issues
-                block_config = deepcopy(self.config.slstm_block)
+                block_config = deepcopy(config.slstm_block)
                 if hasattr(block_config, "_block_idx"):
                     block_config._block_idx = block_idx
                     block_config.__post_init__()
@@ -141,7 +151,8 @@ class xLSTMBlockStack(nnx.Module):
                     sLSTMBlock(
                         config=block_config,
                         rngs=rngs,
-                        dtype=self.dtype,
+                        dtype=dtype,
+                        mesh=mesh,
                     )
                 )
 
@@ -150,32 +161,21 @@ class xLSTMBlockStack(nnx.Module):
 
         return blocks
 
-    # @nnx.jit
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, x: jax.Array):
         """Process input through all blocks in sequence (forward pass).
 
         Args:
             x: Input tensor of shape [B, S, D]
 
         Returns:
-            Processed output tensor of shape [B, S, D]
+            Processed output tensor of shape [B, S, D] and hidden states per block
         """
 
         def _block_scan(carry: jax.Array, block_idx: int):
-            new_state = jax.lax.switch(block_idx, self.blocks, carry)
-            return new_state, None
+            new_state: jax.Array = jax.lax.switch(block_idx, self.blocks, carry)
+            return new_state, new_state
 
-        x, _ = jax.lax.scan(f=_block_scan, init=x, xs=jnp.arange(len(self.blocks)))
+        x_t, h_t = jax.lax.scan(f=_block_scan, init=x, xs=jnp.arange(len(self.blocks)))
+        x_t = self.post_blocks_norm(x_t)
 
-        # for block in self.blocks:
-        #     x = block(x)
-
-        x = self.post_blocks_norm(x)
-
-        return x
-
-    def reset_parameters(self, rngs: nnx.Rngs) -> None:
-        for block in self.blocks:
-            block.reset_parameters(rngs)
-        if not isinstance(self.post_blocks_norm, Identity):
-            self.post_blocks_norm.reset_parameters(rngs)
+        return x_t, h_t
