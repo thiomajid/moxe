@@ -68,8 +68,6 @@ def main(cfg: DictConfig):
             dtype=jnp.float32,
         )
 
-    jitted_model = nnx.jit(model)
-
     # Generate some text
     GENERATION_SAMPLES = ["Once upon a time", "There was a girl", "Next to the tree"]
     choosen_prompt = random.choice(GENERATION_SAMPLES)
