@@ -1,4 +1,3 @@
-import functools
 import math
 import typing as tp
 from functools import partial
@@ -9,6 +8,8 @@ from flax import nnx
 from jax import lax
 from jax.sharding import Mesh
 from transformers import Gemma2Config
+
+from xlstm_jax.mask import apply_padding_mask_with_gradient_stop, create_padding_mask
 
 
 def rotate_half(x: jax.Array):
@@ -33,7 +34,7 @@ def apply_rotary_pos_emb(
     return q_embed, k_embed
 
 
-@functools.partial(jax.jit, static_argnames=("n_rep",))
+@partial(jax.jit, static_argnames=("n_rep",))
 def repeat_kv(hidden_states: jax.Array, n_rep: int):
     """Equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep)."""
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
@@ -44,12 +45,18 @@ def repeat_kv(hidden_states: jax.Array, n_rep: int):
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
+@partial(jax.jit, static_argnums=(1,))
+def soft_cap(weights: jax.Array, cap):
+    weights = weights / cap
+    weights = jnp.tanh(weights)
+    return weights * cap
+
+
 class Gemma2RMSNorm(nnx.Module):
     def __init__(
         self,
         dim: int,
         *,
-        mesh: Mesh,
         rngs: nnx.Rngs,
         dtype=jnp.float32,
         eps: float = 1e-6,
@@ -58,7 +65,7 @@ class Gemma2RMSNorm(nnx.Module):
         self.eps = eps
         self.dtype = dtype
 
-        self.scale = nnx.Param(scale_init(rngs.params(), (dim,), dtype=dtype))
+        self.scale = nnx.Param(scale_init(rngs.params(), (dim,), dtype))
 
     def __call__(self, x: jax.Array):
         output = self._norm(x.astype(self.dtype))
@@ -177,7 +184,7 @@ class Gemma2Attention(nnx.Module):
         self,
         hidden_states: jax.Array,
         position_embeddings: tp.Tuple[jax.Array, jax.Array],
-        attention_mask: tp.tp.Optional[jax.Array] = None,
+        attention_mask: tp.Optional[jax.Array] = None,
     ):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
@@ -203,14 +210,9 @@ class Gemma2Attention(nnx.Module):
             jnp.matmul(query_states, key_states.transpose(0, 1, 3, 2)) * self.scaling
         )
 
-        def _soft_cap(weights: jax.Array):
-            weights = weights / self.attn_logit_softcapping
-            weights = jnp.tanh(weights)
-            return weights * self.attn_logit_softcapping
-
         attn_weights = lax.cond(
             self.attn_logit_softcapping is not None,
-            lambda _x: _soft_cap(_x),
+            lambda _x: soft_cap(_x, self.attn_logit_softcapping),
             lambda _x: _x,
             operand=attn_weights,
         )
@@ -219,8 +221,9 @@ class Gemma2Attention(nnx.Module):
         #     attn_weights = attn_weights + attention_mask
 
         def _apply_mask(weights: jax.Array):
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            return weights + causal_mask
+            mask = attention_mask[:, None, None, :]
+            mask = jnp.broadcast_to(mask, shape=(B, self.num_heads, S, S))
+            return weights * mask
 
         attn_weights = lax.cond(
             attention_mask is not None,
@@ -268,7 +271,6 @@ class Gemma2DecoderLayer(nnx.Module):
             Gemma2RMSNorm,
             config.hidden_size,
             eps=config.rms_norm_eps,
-            mesh=mesh,
             rngs=rngs,
             dtype=dtype,
             scale_init=nnx.with_partitioning(
@@ -290,8 +292,6 @@ class Gemma2DecoderLayer(nnx.Module):
         hidden_states: jax.Array,
         position_embeddings: tp.Tuple[jax.Array, jax.Array],
         attention_mask: tp.Optional[jax.Array] = None,
-        deterministic: bool = True,
-        **kwargs,
     ):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -349,7 +349,14 @@ class Gemma2RotaryEmbedding(nnx.Module):
 
 
 class Gemma2Model(nnx.Module):
-    def __init__(self, config: Gemma2Config, rngs: nnx.Rngs = None):
+    def __init__(
+        self,
+        config: Gemma2Config,
+        *,
+        mesh: Mesh,
+        rngs: nnx.Rngs,
+        dtype=jnp.float32,
+    ):
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -357,121 +364,109 @@ class Gemma2Model(nnx.Module):
         self.embed_tokens = nnx.Embed(
             config.vocab_size,
             config.hidden_size,
-            embedding_init=nnx.initializers.normal(stddev=config.initializer_range),
+            embedding_init=nnx.with_partitioning(
+                nnx.initializers.normal(stddev=config.initializer_range),
+                sharding=(None, "tp"),
+                mesh=mesh,
+            ),
             rngs=rngs,
+            dtype=dtype,
+            param_dtype=dtype,
         )
 
         self.layers = [
-            Gemma2DecoderLayer(config, layer_idx, rngs=rngs)
+            Gemma2DecoderLayer(config, layer_idx, mesh=mesh, rngs=rngs, dtype=dtype)
             for layer_idx in range(config.num_hidden_layers)
         ]
 
-        self.norm = Gemma2RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, rngs=rngs
-        )
-        self.rotary_emb = Gemma2RotaryEmbedding(config=config, rngs=rngs)
+        self.num_layers = len(self.layers)
 
-    def __call__(
-        self,
-        input_ids: tp.Optional[jax.Array] = None,
-        attention_mask: tp.Optional[jax.Array] = None,
-        position_ids: tp.Optional[jax.Array] = None,
-        inputs_embeds: tp.Optional[jax.Array] = None,
-        deterministic: bool = True,
-        **kwargs,
-    ):
-        if input_ids is not None and inputs_embeds is not None:
-            raise ValueError(
-                "You cannot specify both input_ids and inputs_embeds at the same time"
-            )
-        elif input_ids is not None:
-            inputs_embeds = self.embed_tokens(input_ids)
-        elif inputs_embeds is None:
-            raise ValueError("You have to specify either input_ids or inputs_embeds")
+        self.norm = Gemma2RMSNorm(
+            config.hidden_size,
+            eps=config.rms_norm_eps,
+            rngs=rngs,
+            dtype=dtype,
+            scale_init=nnx.with_partitioning(
+                nnx.initializers.ones_init(),
+                sharding=("tp",),
+                mesh=mesh,
+            ),
+        )
+        self.rotary_emb = Gemma2RotaryEmbedding(config=config)
+
+    def __call__(self, input_ids: jax.Array, attention_mask: jax.Array):
+        inputs_embeds = self.embed_tokens(input_ids)
+        padding_mask = create_padding_mask(input_ids, self.padding_idx)
+        inputs_embeds = apply_padding_mask_with_gradient_stop(
+            inputs_embeds, padding_mask
+        )
 
         batch_size, seq_length = inputs_embeds.shape[:2]
 
-        if position_ids is None:
-            position_ids = jnp.arange(seq_length)[None, :]
-            position_ids = jnp.broadcast_to(position_ids, (batch_size, seq_length))
+        position_ids = jnp.arange(seq_length)[None, :]
+        position_ids = jnp.broadcast_to(position_ids, (batch_size, seq_length))
 
         # Get rotary embeddings
         position_embeddings = self.rotary_emb(inputs_embeds, position_ids)
 
-        # Create causal mask if not provided
-        if attention_mask is None:
-            attention_mask = jnp.tril(jnp.ones((seq_length, seq_length)))
-            attention_mask = jnp.where(attention_mask == 0, -jnp.inf, 0.0)
-            attention_mask = attention_mask[
-                None, None, :, :
-            ]  # Add batch and head dimensions
-
-        hidden_states = inputs_embeds
-
         # Apply layers
-        for layer in self.layers:
-            hidden_states, _ = layer(
-                hidden_states=hidden_states,
-                position_embeddings=position_embeddings,
-                attention_mask=attention_mask,
-                deterministic=deterministic,
-                **kwargs,
+        def _layer_scan(carry: jax.Array, idx: jax.Array):
+            h_t, _ = lax.switch(
+                idx,
+                self.layers,
+                carry,
+                position_embeddings,
+                attention_mask,
             )
 
-        hidden_states = self.norm(hidden_states)
+            return h_t, h_t
 
-        return hidden_states
+        h_t, layers_states = lax.scan(
+            f=_layer_scan,
+            init=inputs_embeds,
+            xs=jnp.arange(self.num_layers),
+        )
+
+        h_t = self.norm(h_t)
+
+        return h_t, layers_states
 
 
 class Gemma2ForCausalLM(nnx.Module):
-    def __init__(self, config: Gemma2Config, rngs: nnx.Rngs = None):
+    def __init__(
+        self,
+        config: Gemma2Config,
+        *,
+        mesh: Mesh,
+        rngs: nnx.Rngs,
+        dtype=jnp.float32,
+    ):
         self.config = config
-        self.model = Gemma2Model(config, rngs=rngs)
+        self.model = Gemma2Model(config, mesh=mesh, rngs=rngs, dtype=dtype)
 
-        if config.tie_word_embeddings:
-            self.lm_head = None  # Will use embed_tokens weights
-        else:
-            self.lm_head = nnx.Linear(
-                config.hidden_size, config.vocab_size, use_bias=False, rngs=rngs
-            )
+        self.lm_head = nnx.Linear(
+            config.hidden_size,
+            config.vocab_size,
+            use_bias=False,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.lecun_normal(),
+                sharding=(None, "tp"),
+                mesh=mesh,
+            ),
+        )
 
         self.final_logit_softcapping = config.final_logit_softcapping
 
-    def __call__(
-        self,
-        input_ids: tp.Optional[jax.Array] = None,
-        attention_mask: tp.Optional[jax.Array] = None,
-        position_ids: tp.Optional[jax.Array] = None,
-        inputs_embeds: tp.Optional[jax.Array] = None,
-        deterministic: bool = True,
-        **kwargs,
-    ):
-        hidden_states = self.model(
+    def __call__(self, input_ids: jax.Array, attention_mask: jax.Array):
+        hidden_states, _ = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            position_ids=position_ids,
-            inputs_embeds=inputs_embeds,
-            deterministic=deterministic,
-            **kwargs,
         )
 
-        if self.lm_head is not None:
-            logits = self.lm_head(hidden_states)
-        else:
-            # Use tied embeddings
-            logits = jnp.dot(hidden_states, self.model.embed_tokens.embedding.value.T)
-
-        if self.final_logit_softcapping is not None:
-            logits = logits / self.final_logit_softcapping
-            logits = jnp.tanh(logits)
-            logits = logits * self.final_logit_softcapping
+        logits = self.lm_head(hidden_states)
+        logits = soft_cap(logits, self.final_logit_softcapping)
 
         return logits
-
-
-def load_weights_from_torch(jax_model, torch_model_state_dict):
-    """Load weights from PyTorch model state dict into JAX model."""
-    from .weight_converter import Gemma2WeightConverter
-
-    converter = Gemma2WeightConverter(verbose=True)
-    return converter.convert_torch_to_jax(jax_model, torch_model_state_dict)
