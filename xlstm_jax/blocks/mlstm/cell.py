@@ -28,7 +28,8 @@ class mLSTMCell(nnx.Module):
         *,
         mesh: jax.sharding.Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ):
         # Store configuration parameters for easier access
         self.context_length = config.context_length
@@ -46,7 +47,7 @@ class mLSTMCell(nnx.Module):
             out_features=config.num_heads,
             rngs=rngs,
             dtype=dtype,
-            param_dtype=dtype,
+            param_dtype=param_dtype,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.zeros_init(),
                 sharding=(None, "tp"),
@@ -64,7 +65,7 @@ class mLSTMCell(nnx.Module):
             out_features=config.num_heads,
             rngs=rngs,
             dtype=dtype,
-            param_dtype=dtype,
+            param_dtype=param_dtype,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.zeros_init(),
                 sharding=(None, "tp"),
@@ -84,7 +85,7 @@ class mLSTMCell(nnx.Module):
             use_bias=False,
             rngs=rngs,
             dtype=dtype,
-            param_dtype=dtype,
+            param_dtype=param_dtype,
             scale_init=nnx.with_partitioning(
                 nnx.initializers.ones_init(),
                 sharding=("tp",),

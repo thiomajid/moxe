@@ -44,7 +44,8 @@ class CausalConv1d(nnx.Module):
         *,
         mesh: Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ):
         self.groups = config.feature_dim
         self.kernel_size = config.kernel_size
@@ -66,7 +67,7 @@ class CausalConv1d(nnx.Module):
                 use_bias=config.causal_conv_bias,
                 rngs=rngs,
                 dtype=dtype,
-                param_dtype=dtype,
+                param_dtype=param_dtype,
                 kernel_init=nnx.with_partitioning(
                     initializer=jax.nn.initializers.lecun_normal(),
                     sharding=(None, None, "tp"),

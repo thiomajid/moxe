@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from flax.nnx.nn import dtypes
 
 from xlstm_jax.components.init import small_init_initializer
 
@@ -53,7 +54,8 @@ class LinearHeadwiseExpand(nnx.Module):
         *,
         mesh: jax.sharding.Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ):
         in_features = config.in_features
         num_heads = config.num_heads
@@ -63,12 +65,16 @@ class LinearHeadwiseExpand(nnx.Module):
         self.trainable_kernel = config.trainable_weight
         self.trainable_bias = config.trainable_bias
         self.num_heads = num_heads
+        self.dtype = dtype
+        self.param_dtype = param_dtype
+
+        self.promote_dtype = dtypes.promote_dtype
 
         # Create weight parameter
         self.kernel = nnx.Param(
             jnp.empty(
                 (num_heads, out_features_per_head, in_features_per_head),
-                dtype=dtype,
+                dtype=param_dtype,
             ),
             # init_fn=jax.nn.initializers.normal(stddev=stddev),
             init_fn=nnx.with_partitioning(
@@ -81,7 +87,7 @@ class LinearHeadwiseExpand(nnx.Module):
         # Create bias parameter
         if config.bias:
             self.bias = nnx.Param(
-                jnp.zeros(config._out_features, dtype=dtype),
+                jnp.zeros(config._out_features, dtype=param_dtype),
                 init_fn=nnx.with_partitioning(
                     nnx.initializers.zeros_init(),
                     sharding=("tp",),
@@ -102,20 +108,25 @@ class LinearHeadwiseExpand(nnx.Module):
         """
         shape = x.shape
         x = x.reshape(*shape[:-1], self.num_heads, -1)
+
+        kernel = self.kernel.value
+        bias = self.bias.value if self.bias else None
+        x, kernel, bias = self.promote_dtype((x, kernel, bias), dtype=self.dtype)
+
         kernel = jax.lax.cond(
             self.trainable_kernel,
-            lambda: self.kernel.value,
-            lambda: jax.lax.stop_gradient(self.kernel.value),
+            lambda: kernel,
+            lambda: jax.lax.stop_gradient(kernel),
         )
 
         x = jnp.einsum("...hd,hod->...ho", x, kernel)
         x = x.reshape(*shape[:-1], -1)
 
-        if self.bias is not None:
+        if bias is not None:
             bias = jax.lax.cond(
                 self.trainable_bias,
-                lambda: self.bias.value,
-                lambda: jax.lax.stop_gradient(self.bias.value),
+                lambda: bias,
+                lambda: jax.lax.stop_gradient(bias),
             )
 
             x = x + bias

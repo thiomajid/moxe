@@ -3,6 +3,7 @@
 # Converted to JAX/Flax by Abdoul Majid O. Thiombiano
 import typing as tp
 from dataclasses import dataclass
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -41,7 +42,8 @@ class sLSTMLayer(nnx.Module):
         *,
         mesh: jax.sharding.Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ):
         self.conv1d_kernel_size = config.conv1d_kernel_size
 
@@ -49,8 +51,9 @@ class sLSTMLayer(nnx.Module):
         if config.conv1d_kernel_size > 0:
             self.conv1d = CausalConv1d(
                 rngs=rngs,
-                dtype=dtype,
                 mesh=mesh,
+                dtype=dtype,
+                param_dtype=param_dtype,
                 config=CausalConv1dConfig(
                     feature_dim=config.embedding_dim,
                     kernel_size=config.conv1d_kernel_size,
@@ -64,43 +67,35 @@ class sLSTMLayer(nnx.Module):
             bias=False,
         )
 
-        # We initialize all gate projections explicitly
-        self.fgate = LinearHeadwiseExpand(
+        Gate = partial(
+            LinearHeadwiseExpand,
             config=gate_config,
+            mesh=mesh,
             rngs=rngs,
             dtype=dtype,
-            mesh=mesh,
+            param_dtype=param_dtype,
         )
 
-        self.igate = LinearHeadwiseExpand(
-            config=gate_config,
-            rngs=rngs,
-            dtype=dtype,
-            mesh=mesh,
-        )
-
-        self.zgate = LinearHeadwiseExpand(
-            config=gate_config,
-            rngs=rngs,
-            dtype=dtype,
-            mesh=mesh,
-        )
-
-        self.ogate = LinearHeadwiseExpand(
-            config=gate_config,
-            rngs=rngs,
-            dtype=dtype,
-            mesh=mesh,
-        )
+        self.fgate = Gate()
+        self.igate = Gate()
+        self.zgate = Gate()
+        self.ogate = Gate()
 
         # sLSTM cell and normalization
-        self.slstm_cell = sLSTMCell(config, mesh=mesh, rngs=rngs, dtype=dtype)
+        self.slstm_cell = sLSTMCell(
+            config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )
+
         self.group_norm = MultiHeadLayerNorm(
             num_features=config.embedding_dim,
             use_scale=config.group_norm_weight,
             rngs=rngs,
             dtype=dtype,
-            param_dtype=dtype,
+            param_dtype=param_dtype,
             scale_init=nnx.with_partitioning(
                 nnx.initializers.ones_init(),
                 sharding=("tp",),
@@ -120,7 +115,6 @@ class sLSTMLayer(nnx.Module):
         x: jax.Array,
         slstm_state: tp.Optional[jax.Array] = None,
         return_last_state: bool = False,
-        training: bool = False,
     ) -> tp.Union[jax.Array, tuple[jax.Array, dict[str, tp.Any]]]:
         """Process a sequence through the sLSTM layer.
 
@@ -153,7 +147,7 @@ class sLSTMLayer(nnx.Module):
 
         # Process through sLSTM cell
         y, slstm_state = self.slstm_cell(gates_combined, state=slstm_state)
-        y = self.dropout(y, deterministic=not training)
+        y = self.dropout(y)
 
         out = self.group_norm(y)
         out = out.transpose(0, 2, 1, 3).reshape(B, S, -1)

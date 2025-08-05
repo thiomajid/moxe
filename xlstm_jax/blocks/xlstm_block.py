@@ -66,7 +66,8 @@ class xLSTMBlock(nnx.Module):
         *,
         mesh: jax.sharding.Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ) -> None:
         """Initialize an xLSTM block.
 
@@ -85,18 +86,27 @@ class xLSTMBlock(nnx.Module):
             use_scale=True,
             use_bias=False,
             rngs=rngs,
-            dtype=dtype,
             mesh=mesh,
+            dtype=dtype,
+            param_dtype=param_dtype,
         )
 
         if config.mlstm is not None:
             self.xlstm = mLSTMLayer(
-                config=config.mlstm, mesh=mesh, rngs=rngs, dtype=dtype
+                config=config.mlstm,
+                mesh=mesh,
+                rngs=rngs,
+                dtype=dtype,
+                param_dtype=param_dtype,
             )
 
         elif config.slstm is not None:
             self.xlstm = sLSTMLayer(
-                config=config.slstm, mesh=mesh, rngs=rngs, dtype=dtype
+                config=config.slstm,
+                mesh=mesh,
+                rngs=rngs,
+                dtype=dtype,
+                param_dtype=param_dtype,
             )
         else:
             raise ValueError("Either mlstm or slstm must be provided")
@@ -106,9 +116,10 @@ class xLSTMBlock(nnx.Module):
                 num_features=config.feedforward.embedding_dim,
                 use_scale=True,
                 use_bias=False,
+                mesh=mesh,
                 rngs=rngs,
                 dtype=dtype,
-                mesh=mesh,
+                param_dtype=param_dtype,
             )
 
             self.ffn = create_feedforward(
@@ -116,6 +127,7 @@ class xLSTMBlock(nnx.Module):
                 mesh=mesh,
                 rngs=rngs,
                 dtype=dtype,
+                param_dtype=param_dtype,
             )
         else:
             self.ffn_norm = None

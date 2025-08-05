@@ -2,11 +2,13 @@
 # Maximilian Beck
 # Converted to JAX/Flax by Abdoul Majid O. Thiombiano
 from dataclasses import dataclass
+from functools import partial
 from typing import Optional
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from flax.nnx.nn import dtypes
 
 from ...components.conv import CausalConv1d, CausalConv1dConfig
 from ...components.init import small_init_initializer, wang_initializer
@@ -48,8 +50,12 @@ class mLSTMLayer(nnx.Module):
         *,
         mesh: jax.sharding.Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ):
+        self.promote_dtype = dtypes.promote_dtype
+        self.dtype = dtype
+
         # Up-projection
         self.proj_up = nnx.Linear(
             in_features=config.embedding_dim,
@@ -57,7 +63,7 @@ class mLSTMLayer(nnx.Module):
             use_bias=config.bias,
             rngs=rngs,
             dtype=dtype,
-            param_dtype=dtype,
+            param_dtype=param_dtype,
             kernel_init=nnx.with_partitioning(
                 small_init_initializer(dim=config.embedding_dim),
                 sharding=(None, "tp"),
@@ -72,32 +78,25 @@ class mLSTMLayer(nnx.Module):
 
         # QKV projections
         num_proj_heads = round(config._inner_embedding_dim // config.qkv_proj_blocksize)
+
         qkv_config = LinearHeadwiseExpandConfig(
             in_features=config._inner_embedding_dim,
             num_heads=num_proj_heads,
             bias=config.bias,
         )
 
-        self.q_proj = LinearHeadwiseExpand(
+        LinearQKV = partial(
+            LinearHeadwiseExpand,
             config=qkv_config,
             mesh=mesh,
             rngs=rngs,
             dtype=dtype,
+            param_dtype=param_dtype,
         )
 
-        self.k_proj = LinearHeadwiseExpand(
-            config=qkv_config,
-            mesh=mesh,
-            rngs=rngs,
-            dtype=dtype,
-        )
-
-        self.v_proj = LinearHeadwiseExpand(
-            config=qkv_config,
-            mesh=mesh,
-            rngs=rngs,
-            dtype=dtype,
-        )
+        self.q_proj = LinearQKV()
+        self.k_proj = LinearQKV()
+        self.v_proj = LinearQKV()
 
         # Convolutional layer
         self.conv1d = CausalConv1d(
@@ -115,6 +114,7 @@ class mLSTMLayer(nnx.Module):
             mesh=mesh,
             rngs=rngs,
             dtype=dtype,
+            param_dtype=param_dtype,
             config=mLSTMCellConfig(
                 context_length=config.context_length,
                 embedding_dim=config._inner_embedding_dim,
@@ -126,7 +126,7 @@ class mLSTMLayer(nnx.Module):
 
         # Learnable skip connection parameter
         self.learnable_skip = nnx.Param(
-            jnp.empty(config._inner_embedding_dim, dtype=dtype),
+            jnp.empty(config._inner_embedding_dim, dtype=param_dtype),
             init_fn=nnx.with_partitioning(
                 nnx.initializers.ones_init(),
                 sharding=("tp",),
@@ -141,10 +141,11 @@ class mLSTMLayer(nnx.Module):
             use_bias=config.bias,
             rngs=rngs,
             dtype=dtype,
-            param_dtype=dtype,
+            param_dtype=param_dtype,
             kernel_init=nnx.with_partitioning(
                 wang_initializer(
-                    dim=config.embedding_dim, num_blocks=config._num_blocks
+                    dim=config.embedding_dim,
+                    num_blocks=config._num_blocks,
                 ),
                 sharding=("tp", None),
             ),
@@ -157,7 +158,7 @@ class mLSTMLayer(nnx.Module):
 
         self.dropout = nnx.Dropout(rate=config.dropout, rngs=rngs)
 
-    def __call__(self, x: jax.Array, training: bool = False):
+    def __call__(self, x: jax.Array):
         """Forward pass for processing a full sequence.
 
         Args:
@@ -180,11 +181,15 @@ class mLSTMLayer(nnx.Module):
         v = self.v_proj(x_mlstm)
         h_tilde_state = self.mlstm_cell(q=q, k=k, v=v)
 
-        h_tilde_state_skip = h_tilde_state + (self.learnable_skip * x_mlstm_conv_act)
+        h_tilde_state, learnable_skip, x_mlstm_conv_act = self.promote_dtype(
+            (h_tilde_state, self.learnable_skip.value, x_mlstm_conv_act),
+            dtype=self.dtype,
+        )
+        h_tilde_state_skip = h_tilde_state + (learnable_skip * x_mlstm_conv_act)
 
         # Output / z branch
         h_state = h_tilde_state_skip * self.ogate_act_fn(z)
 
         # Down-projection with dropout
-        y = self.dropout(self.proj_down(h_state), deterministic=not training)
+        y = self.dropout(self.proj_down(h_state))
         return y

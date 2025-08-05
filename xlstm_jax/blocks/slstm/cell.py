@@ -9,6 +9,7 @@ import chex
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from flax.nnx.nn import dtypes
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
@@ -125,7 +126,8 @@ class sLSTMCellBase(nnx.Module):
         *,
         mesh: Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ):
         # Check configuration validity
         if config.hidden_size % config.num_heads != 0:
@@ -148,11 +150,14 @@ class sLSTMCellBase(nnx.Module):
         self.recurrent_weight_init = config.recurrent_weight_init
         self.bias_init = config.bias_init
 
+        self.promote_dtype = dtypes.promote_dtype
+        self.dtype = dtype
+
         # Initialize recurrent kernel
         self._recurrent_kernel_ = nnx.Param(
             jnp.zeros(
                 (config.num_heads, head_dim, config.num_gates, head_dim),
-                dtype=dtype,
+                dtype=param_dtype,
             ),
             init_fn=nnx.with_partitioning(
                 self._initialize_recurrent_kernel,
@@ -165,7 +170,7 @@ class sLSTMCellBase(nnx.Module):
         self._bias_ = nnx.Param(
             jnp.zeros(
                 (config.num_heads, config.num_gates, head_dim),
-                dtype=dtype,
+                dtype=param_dtype,
             ),
             init_fn=nnx.with_partitioning(
                 self._initialize_bias,
@@ -342,9 +347,16 @@ class sLSTMCell_vanilla(sLSTMCellBase):
         config: sLSTMCellConfig,
         mesh: Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ):
-        super().__init__(config, mesh=mesh, rngs=rngs, dtype=dtype)
+        super().__init__(
+            config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )
 
         # Load pointwise function
         self.pointwise = slstm_pointwise_function_registry[config.function]
@@ -403,6 +415,11 @@ class sLSTMCell_vanilla(sLSTMCellBase):
         rk_internal = self._recurrent_kernel_ext2int(self._recurrent_kernel_)
         bias_internal = self._bias_ext2int(self._bias_)
 
+        rk_internal, bias_internal, input, state = self.promote_dtype(
+            (rk_internal, bias_internal, input, state),
+            dtype=self.dtype,
+        )
+
         with self.mesh:
             input = jax.lax.with_sharding_constraint(input, P(None, "dp", None))
             state = jax.lax.with_sharding_constraint(state, P(None, "dp", "tp"))
@@ -442,8 +459,15 @@ class sLSTMCell(nnx.Module):
         config: sLSTMCellConfig,
         mesh: Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ):
         # Override config to ensure vanilla backend
         config.backend = "vanilla"
-        return sLSTMCell_vanilla(config, mesh=mesh, rngs=rngs, dtype=dtype)
+        return sLSTMCell_vanilla(
+            config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )

@@ -7,8 +7,6 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from xlstm_jax.mask import apply_padding_mask_with_gradient_stop, create_padding_mask
-
 from .components.init import small_init_initializer
 from .xlstm_block_stack import xLSTMBlockStack, xLSTMBlockStackConfig
 
@@ -37,13 +35,15 @@ class xLSTMLMModel(nnx.Module):
         *,
         mesh: jax.sharding.Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ):
         self.xlstm_block_stack = xLSTMBlockStack(
             config=config,
             mesh=mesh,
             rngs=rngs,
             dtype=dtype,
+            param_dtype=param_dtype,
         )
 
         self.token_embedding = nnx.Embed(
@@ -51,7 +51,7 @@ class xLSTMLMModel(nnx.Module):
             features=config.embedding_dim,
             rngs=rngs,
             dtype=dtype,
-            param_dtype=dtype,
+            param_dtype=param_dtype,
             embedding_init=nnx.with_partitioning(
                 nnx.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0),
                 sharding=(None, "tp"),
@@ -70,8 +70,8 @@ class xLSTMLMModel(nnx.Module):
             out_features=config.vocab_size,
             use_bias=False,
             rngs=rngs,
-            param_dtype=dtype,
             dtype=dtype,
+            param_dtype=param_dtype,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.lecun_normal(),
                 sharding=(None, "tp"),
@@ -83,7 +83,7 @@ class xLSTMLMModel(nnx.Module):
         if config.tie_weights:
             # Create a single shared weight for both embedding and output
             self.shared_weight = nnx.Param(
-                jnp.zeros((config.vocab_size, config.embedding_dim), dtype=dtype),
+                jnp.zeros((config.vocab_size, config.embedding_dim), dtype=param_dtype),
                 init_fn=nnx.with_partitioning(
                     small_init_initializer(dim=config.embedding_dim),
                     sharding=(None, "tp"),
@@ -114,8 +114,8 @@ class xLSTMLMModel(nnx.Module):
         else:
             h_t = self.token_embedding(input_ids)
 
-        padding_mask = create_padding_mask(input_ids, self.pad_token_id)
-        h_t = apply_padding_mask_with_gradient_stop(h_t, padding_mask)
+        # padding_mask = create_padding_mask(input_ids, self.pad_token_id)
+        # h_t = apply_padding_mask_with_gradient_stop(h_t, padding_mask)
 
         h_t = self.embedding_dropout(h_t)
         h_t, _ = self.xlstm_block_stack(h_t)

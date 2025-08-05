@@ -4,7 +4,6 @@ from flax import nnx
 from jax.sharding import Mesh
 
 from xlstm_jax.components.ln import LayerNorm
-from xlstm_jax.mask import apply_padding_mask_with_gradient_stop, create_padding_mask
 
 from ..config import MoxEConfig
 from ..output import MoELayerType, MoxECausalLMOutput, MoxEModelOutput
@@ -61,8 +60,8 @@ class MoxEModel(nnx.Module):
         return_layers_outputs: bool = False,
     ):
         h_t = self.token_embedding(input_ids)
-        padding_mask = create_padding_mask(input_ids, self.pad_token_id)
-        h_t = apply_padding_mask_with_gradient_stop(h_t, padding_mask)
+        # padding_mask = create_padding_mask(input_ids, self.pad_token_id)
+        # h_t = apply_padding_mask_with_gradient_stop(h_t, padding_mask)
 
         h_t = jax.lax.cond(
             isinstance(self.embedding_dropout, nnx.Dropout),

@@ -61,7 +61,8 @@ class GatedFeedForward(nnx.Module):
         *,
         mesh: Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ):
         # Initialize linear layers
         self.proj_up = nnx.Linear(
@@ -70,7 +71,7 @@ class GatedFeedForward(nnx.Module):
             use_bias=config.bias,
             rngs=rngs,
             dtype=dtype,
-            param_dtype=dtype,
+            param_dtype=param_dtype,
             kernel_init=nnx.with_partitioning(
                 small_init_initializer(dim=config.embedding_dim),
                 sharding=(None, "tp"),
@@ -88,8 +89,8 @@ class GatedFeedForward(nnx.Module):
             out_features=config.embedding_dim,
             use_bias=config.bias,
             rngs=rngs,
-            param_dtype=dtype,
             dtype=dtype,
+            param_dtype=param_dtype,
             kernel_init=nnx.with_partitioning(
                 wang_initializer(
                     dim=config.embedding_dim, num_blocks=config._num_blocks
@@ -107,7 +108,7 @@ class GatedFeedForward(nnx.Module):
         self.act_fn = get_act_fn(config.act_fn)
         self.dropout = nnx.Dropout(rate=config.dropout, rngs=rngs)
 
-    def __call__(self, x: jax.Array, training: bool = False):
+    def __call__(self, x: jax.Array):
         # Project up and split into gate and activation path
         up_proj_output = self.proj_up(x)
         gate_preact, up_proj = jnp.split(
@@ -119,16 +120,26 @@ class GatedFeedForward(nnx.Module):
 
         activated = self.act_fn(gate_preact) * up_proj
         output = self.proj_down(activated)
-        output = self.dropout(output, deterministic=not training)
+        output = self.dropout(output)
 
         return output
 
 
 def create_feedforward(
-    config: FeedForwardConfig, mesh: Mesh, rngs: nnx.Rngs, dtype=jnp.float32
+    config: FeedForwardConfig,
+    mesh: Mesh,
+    rngs: nnx.Rngs,
+    dtype=jnp.bfloat16,
+    param_dtype=jnp.float32,
 ):
     """Factory function to create feedforward modules based on config."""
     if config.ff_type == "ffn_gated":
-        return GatedFeedForward(config, mesh=mesh, rngs=rngs, dtype=dtype)
+        return GatedFeedForward(
+            config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )
 
     raise ValueError(f"Unknown feedforward type {config.ff_type}")

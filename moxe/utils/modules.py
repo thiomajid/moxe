@@ -1,54 +1,39 @@
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import jax
+import jax.numpy as jnp
 import jax.tree_util as jtu
 import orbax.checkpoint as ocp
 from flax import nnx
 
+from moxe.config import MoxEConfig
+from moxe.modules.mlstm_moe import mLSTMMoELayer
+from moxe.modules.moxe import MoxELayer
+from moxe.modules.slstm_moe import sLSTMMoELayer
+from moxe.output import MoELayerType
 from moxe.tensorboard import TensorBoardLogger
 
 
-class Sequential(nnx.Module):
-    def __init__(self, modules: list[nnx.Module]):
-        self.modules = modules
-        self._num_modules = len(modules)
-
-    def __call__(self, x):
-        for module in self.modules:
-            x = module(x)
-        return x
-
-    def __len__(self):
-        return self._num_modules
-
-    def __iter__(self):
-        return iter(self.modules)
-
-    def __getitem__(self, idx: int):
-        return self.modules[idx]
-
-
-class ModuleList(nnx.Module):
-    def __init__(self, modules: list[nnx.Module]):
-        self.modules = modules
-
-    def __len__(self):
-        return len(self.modules)
-
-    def __iter__(self):
-        return iter(self.modules)
-
-    def __getitem__(self, idx: int):
-        return self.modules[idx]
-
-    def __call__(self, index: Any, *args):
-        return jax.lax.switch(
-            index,
-            self.modules,
-            *args,
+@nnx.vmap(in_axes=(None, None, None, 0, None), out_axes=0)
+def _create_moxe_layers(
+    config: MoxEConfig,
+    layer_type: str,
+    mesh: jax.sharding.Mesh,
+    rngs: nnx.Rngs,
+    dtype=jnp.float32,
+):
+    if layer_type == MoELayerType.mLSTM:
+        return mLSTMMoELayer(config, mesh=mesh, rngs=rngs, dtype=dtype)
+    elif layer_type == MoELayerType.sLSTM:
+        return sLSTMMoELayer(config, mesh=mesh, rngs=rngs, dtype=dtype)
+    elif layer_type == MoELayerType.MoxE:
+        return MoxELayer(config, mesh=mesh, rngs=rngs, dtype=dtype)
+    else:
+        raise ValueError(
+            f"Unknown MoE layer type: {layer_type}"
+            f" Supported types are: {MoELayerType.values()}"
         )
 
 

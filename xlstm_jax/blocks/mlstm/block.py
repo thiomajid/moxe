@@ -41,7 +41,8 @@ class mLSTMBlock(xLSTMBlock):
         *,
         mesh: jax.sharding.Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ) -> None:
         """Initialize an mLSTM block.
 
@@ -58,4 +59,10 @@ class mLSTMBlock(xLSTMBlock):
         )
 
         # Initialize using the parent class constructor
-        super().__init__(config=xlstm_config, mesh=mesh, rngs=rngs, dtype=dtype)
+        super().__init__(
+            config=xlstm_config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )

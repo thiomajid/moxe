@@ -20,7 +20,8 @@ def LayerNorm(
     use_scale: bool = True,
     use_bias: bool = False,
     epsilon: float = 1e-5,
-    dtype=jnp.float32,
+    dtype=jnp.bfloat16,
+    param_dtype=jnp.float32,
 ):
     return nnx.LayerNorm(
         num_features=num_features,
@@ -28,7 +29,7 @@ def LayerNorm(
         use_bias=use_bias,
         rngs=rngs,
         dtype=dtype,
-        param_dtype=dtype,
+        param_dtype=param_dtype,
         epsilon=epsilon,
         scale_init=nnx.with_partitioning(
             nnx.initializers.ones_init(),
@@ -62,7 +63,7 @@ class MultiHeadLayerNorm(nnx.Module):
         residual_scale: bool = True,
         *,
         epsilon: float = 1e-5,
-        dtype: tp.Optional[Dtype] = None,
+        dtype=jnp.bfloat16,
         param_dtype: Dtype = jnp.float32,
         use_bias: bool = False,
         use_scale: bool = True,

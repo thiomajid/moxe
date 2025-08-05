@@ -51,14 +51,14 @@ class sLSTMBlock(xLSTMBlock):
         *,
         mesh: Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ):
         """Initialize an sLSTM block.
 
         Args:
             config: Configuration object for the sLSTM block
         """
-        # Create an xLSTM config with only the sLSTM component active
         xlstm_config = xLSTMBlockConfig(
             mlstm=None,
             slstm=config.slstm,
@@ -68,4 +68,10 @@ class sLSTMBlock(xLSTMBlock):
         )
 
         # Initialize using the parent class constructor
-        super().__init__(config=xlstm_config, mesh=mesh, rngs=rngs, dtype=dtype)
+        super().__init__(
+            config=xlstm_config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )

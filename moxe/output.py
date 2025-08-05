@@ -88,7 +88,7 @@ class ModulationBias:
         ]
 
 
-@struct.dataclass
+@struct.dataclass(unsafe_hash=True, order=True)
 class ConditionedGateOutput:
     unbiased_logits: jax.Array
     conditioned_logits: jax.Array
@@ -101,7 +101,7 @@ class ConditionedGateOutput:
     group_loss: jax.Array
 
 
-@struct.dataclass
+@struct.dataclass(unsafe_hash=True, order=True)
 class MoxELayerOutput:
     """
     This class is used to store the output of the MoE layer.
@@ -122,20 +122,20 @@ class MoxELayerOutput:
     conditioned_output: tp.Optional[ConditionedGateOutput] = None
 
 
-@struct.dataclass
+@struct.dataclass(unsafe_hash=True, order=True)
 class MoxEModelOutput:
     hidden_states: jax.Array
     layers_outputs: tp.Optional[tuple[MoxELayerOutput]] = None
 
 
-@struct.dataclass
+@struct.dataclass(unsafe_hash=True, order=True)
 class MoxECausalLMOutput:
     logits: jax.Array
     hidden_states: tp.Optional[jax.Array] = None
     layers_outputs: tp.Optional[tuple[MoxELayerOutput]] = None
 
 
-@struct.dataclass
+@struct.dataclass(unsafe_hash=True, order=True)
 class MoxEForwardPassOutput:
     ce_loss: jax.Array
     z_loss: jax.Array

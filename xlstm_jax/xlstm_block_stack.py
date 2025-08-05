@@ -78,37 +78,37 @@ class xLSTMBlockStackConfig:
         self._block_map = self._create_block_map()
 
 
-@nnx.vmap(in_axes=(None, None, 0, None), out_axes=0)
+@nnx.vmap(in_axes=(0, 0, None, None, None), out_axes=0)
 def _slstm_blocks_vmap(
-    config: xLSTMBlockStackConfig,
-    mesh: jax.sharding.Mesh,
+    block_config: sLSTMBlockConfig,
     rngs: nnx.Rngs,
-    dtype=jnp.float32,
+    mesh: jax.sharding.Mesh,
+    dtype=jnp.bfloat16,
+    param_dtype=jnp.float32,
 ):
-    block_config = deepcopy(config.slstm_block)
-    block_config.__post_init__()
     return sLSTMBlock(
         config=block_config,
         rngs=rngs,
-        dtype=dtype,
         mesh=mesh,
+        dtype=dtype,
+        param_dtype=param_dtype,
     )
 
 
-@nnx.vmap(in_axes=(None, None, 0, None), out_axes=0)
+@nnx.vmap(in_axes=(0, 0, None, None, None), out_axes=0)
 def _mlstm_blocks_vmap(
-    config: xLSTMBlockStackConfig,
-    mesh: jax.sharding.Mesh,
+    block_config: mLSTMBlockConfig,
     rngs: nnx.Rngs,
-    dtype=jnp.float32,
+    mesh: jax.sharding.Mesh,
+    dtype=jnp.bfloat16,
+    param_dtype=jnp.float32,
 ):
-    block_config = deepcopy(config.slstm_block)
-    block_config.__post_init__()
     return mLSTMBlock(
         config=block_config,
         rngs=rngs,
-        dtype=dtype,
         mesh=mesh,
+        dtype=dtype,
+        param_dtype=param_dtype,
     )
 
 
@@ -116,21 +116,44 @@ def _create_blocks(
     config: xLSTMBlockStackConfig,
     mesh: jax.sharding.Mesh,
     rngs: nnx.Rngs,
-    dtype=jnp.float32,
+    dtype=jnp.bfloat16,
+    param_dtype=jnp.float32,
 ):
     if all(idx == 0 for idx in config.block_map):
+        mlstm_configs = []
+
+        for block_idx, block_type_int in enumerate(config.block_map):
+            block_config = deepcopy(config.mlstm_block)
+            if hasattr(block_config, "_block_idx"):
+                block_config._block_idx = block_idx
+                block_config.__post_init__()
+
+            mlstm_configs.append(block_config)
+
         return _mlstm_blocks_vmap(
-            config,
-            mesh,
+            mlstm_configs,
             rngs.fork(split=len(config.block_map)),
+            mesh,
             dtype,
+            param_dtype,
         )
     elif all(idx == 1 for idx in config.block_map):
+        slstm_configs = []
+
+        for block_idx, block_type_int in enumerate(config.block_map):
+            block_config = deepcopy(config.slstm_block)
+            if hasattr(block_config, "_block_idx"):
+                block_config._block_idx = block_idx
+                block_config.__post_init__()
+
+            slstm_configs.append(block_config)
+
         return _slstm_blocks_vmap(
-            config,
-            mesh,
+            slstm_configs,
             rngs.fork(split=len(config.block_map)),
+            mesh,
             dtype,
+            param_dtype,
         )
 
     blocks: list[mLSTMBlock | sLSTMBlock] = []
@@ -144,8 +167,9 @@ def _create_blocks(
                 mLSTMBlock(
                     config=block_config,
                     rngs=rngs,
-                    dtype=dtype,
                     mesh=mesh,
+                    dtype=dtype,
+                    param_dtype=param_dtype,
                 )
             )
 
@@ -158,8 +182,9 @@ def _create_blocks(
                 sLSTMBlock(
                     config=block_config,
                     rngs=rngs,
-                    dtype=dtype,
                     mesh=mesh,
+                    dtype=dtype,
+                    param_dtype=param_dtype,
                 )
             )
 
@@ -190,13 +215,15 @@ class xLSTMBlockStack(nnx.Module):
         *,
         mesh: jax.sharding.Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ):
         self.blocks = _create_blocks(
             config=config,
             mesh=mesh,
             rngs=rngs,
             dtype=dtype,
+            param_dtype=param_dtype,
         )
 
         self.post_blocks_norm = (
@@ -204,8 +231,9 @@ class xLSTMBlockStack(nnx.Module):
                 num_features=config.embedding_dim,
                 use_bias=False,
                 rngs=rngs,
-                dtype=dtype,
                 mesh=mesh,
+                dtype=dtype,
+                param_dtype=param_dtype,
             )
             if config.add_post_blocks_norm
             else jax.nn.identity
