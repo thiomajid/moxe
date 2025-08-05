@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Script to visualize MoxE auxiliary losses from TensorBoard logs.
 

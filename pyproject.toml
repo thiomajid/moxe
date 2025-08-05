@@ -26,6 +26,4 @@ dependencies = [
 packages = ["moxe"]
 
 [dependency-groups]
-dev = [
-    "xlstm>=2.0.4",
-]
+dev = ["xlstm>=2.0.4"]

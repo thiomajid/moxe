@@ -78,6 +78,103 @@ class xLSTMBlockStackConfig:
         self._block_map = self._create_block_map()
 
 
+@nnx.vmap(in_axes=(None, None, 0, None), out_axes=0)
+def _slstm_blocks_vmap(
+    config: xLSTMBlockStackConfig,
+    mesh: jax.sharding.Mesh,
+    rngs: nnx.Rngs,
+    dtype=jnp.float32,
+):
+    block_config = deepcopy(config.slstm_block)
+    block_config.__post_init__()
+    return sLSTMBlock(
+        config=block_config,
+        rngs=rngs,
+        dtype=dtype,
+        mesh=mesh,
+    )
+
+
+@nnx.vmap(in_axes=(None, None, 0, None), out_axes=0)
+def _mlstm_blocks_vmap(
+    config: xLSTMBlockStackConfig,
+    mesh: jax.sharding.Mesh,
+    rngs: nnx.Rngs,
+    dtype=jnp.float32,
+):
+    block_config = deepcopy(config.slstm_block)
+    block_config.__post_init__()
+    return mLSTMBlock(
+        config=block_config,
+        rngs=rngs,
+        dtype=dtype,
+        mesh=mesh,
+    )
+
+
+def _create_blocks(
+    config: xLSTMBlockStackConfig,
+    mesh: jax.sharding.Mesh,
+    rngs: nnx.Rngs,
+    dtype=jnp.float32,
+):
+    if all(idx == 0 for idx in config.block_map):
+        return _mlstm_blocks_vmap(
+            config,
+            mesh,
+            rngs.fork(split=len(config.block_map)),
+            dtype,
+        )
+    elif all(idx == 1 for idx in config.block_map):
+        return _slstm_blocks_vmap(
+            config,
+            mesh,
+            rngs.fork(split=len(config.block_map)),
+            dtype,
+        )
+
+    blocks: list[mLSTMBlock | sLSTMBlock] = []
+    for block_idx, block_type_int in enumerate(config.block_map):
+        if block_type_int == 0:
+            block_config = deepcopy(config.mlstm_block)
+            if hasattr(block_config, "_block_idx"):
+                block_config._block_idx = block_idx
+                block_config.__post_init__()
+            blocks.append(
+                mLSTMBlock(
+                    config=block_config,
+                    rngs=rngs,
+                    dtype=dtype,
+                    mesh=mesh,
+                )
+            )
+
+        elif block_type_int == 1:
+            block_config = deepcopy(config.slstm_block)
+            if hasattr(block_config, "_block_idx"):
+                block_config._block_idx = block_idx
+                block_config.__post_init__()
+            blocks.append(
+                sLSTMBlock(
+                    config=block_config,
+                    rngs=rngs,
+                    dtype=dtype,
+                    mesh=mesh,
+                )
+            )
+
+        else:
+            raise ValueError(f"Invalid block type {block_type_int}")
+
+    return blocks
+
+
+@nnx.scan(in_axes=(0, nnx.Carry), out_axes=(nnx.Carry, 0))
+def _scan_over_blocks(block: mLSTMBlock | sLSTMBlock, carry: jax.Array):
+    next_state = block(carry)
+    return next_state, next_state
+
+
 class xLSTMBlockStack(nnx.Module):
     """Stack of xLSTM blocks that can be either mLSTM or sLSTM blocks.
 
@@ -95,14 +192,13 @@ class xLSTMBlockStack(nnx.Module):
         rngs: nnx.Rngs,
         dtype=jnp.float32,
     ):
-        self.blocks = self._create_blocks(
+        self.blocks = _create_blocks(
             config=config,
             mesh=mesh,
             rngs=rngs,
             dtype=dtype,
         )
 
-        # Create post-blocks normalization layer
         self.post_blocks_norm = (
             LayerNorm(
                 num_features=config.embedding_dim,
@@ -115,52 +211,6 @@ class xLSTMBlockStack(nnx.Module):
             else jax.nn.identity
         )
 
-    def _create_blocks(
-        self,
-        config: xLSTMBlockStackConfig,
-        mesh: jax.sharding.Mesh,
-        rngs: nnx.Rngs,
-        dtype=jnp.float32,
-    ):
-        """Create blocks according to the block map in the configuration."""
-        blocks: list[mLSTMBlock | sLSTMBlock] = []
-
-        for block_idx, block_type_int in enumerate(config.block_map):
-            if block_type_int == 0:
-                # Clone configuration to avoid modification issues
-                block_config = deepcopy(config.mlstm_block)
-                if hasattr(block_config, "_block_idx"):
-                    block_config._block_idx = block_idx
-                    block_config.__post_init__()
-                blocks.append(
-                    mLSTMBlock(
-                        config=block_config,
-                        rngs=rngs,
-                        dtype=dtype,
-                        mesh=mesh,
-                    )
-                )
-
-            elif block_type_int == 1:
-                # Clone configuration to avoid modification issues
-                block_config = deepcopy(config.slstm_block)
-                if hasattr(block_config, "_block_idx"):
-                    block_config._block_idx = block_idx
-                    block_config.__post_init__()
-                blocks.append(
-                    sLSTMBlock(
-                        config=block_config,
-                        rngs=rngs,
-                        dtype=dtype,
-                        mesh=mesh,
-                    )
-                )
-
-            else:
-                raise ValueError(f"Invalid block type {block_type_int}")
-
-        return blocks
-
     def __call__(self, x: jax.Array):
         """Process input through all blocks in sequence (forward pass).
 
@@ -171,11 +221,7 @@ class xLSTMBlockStack(nnx.Module):
             Processed output tensor of shape [B, S, D] and hidden states per block
         """
 
-        def _block_scan(carry: jax.Array, block_idx: int):
-            new_state: jax.Array = jax.lax.switch(block_idx, self.blocks, carry)
-            return new_state, new_state
-
-        x_t, h_t = jax.lax.scan(f=_block_scan, init=x, xs=jnp.arange(len(self.blocks)))
+        x_t, h_t = _scan_over_blocks(self.blocks, x)
         x_t = self.post_blocks_norm(x_t)
 
         return x_t, h_t
