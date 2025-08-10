@@ -1,10 +1,6 @@
-import os
 from functools import partial
 
-from moxe.modules.model import MoxEForCausalLM
-
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
-
+# os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 import hydra
 import jax
 import jax.numpy as jnp
@@ -14,6 +10,7 @@ from jax.sharding import Mesh
 from omegaconf import DictConfig, OmegaConf
 
 from moxe.config import MoxEConfig
+from moxe.modules.model import MoxEForCausalLM
 from moxe.utils.modules import count_parameters
 
 
@@ -33,7 +30,7 @@ def create_sharded_model(mesh: Mesh, config: MoxEConfig):
 @hydra.main(config_path="./configs", config_name="config", version_base="1.1")
 def main(cfg: DictConfig):
     config = MoxEConfig.from_dict(OmegaConf.to_container(cfg["model"], resolve=True))
-    USE_JIT = False
+    USE_JIT = True
     model = None
 
     dummy_input = jax.random.randint(
@@ -44,7 +41,7 @@ def main(cfg: DictConfig):
     )
 
     print("Creating device mesh")
-    devices = mesh_utils.create_device_mesh((2, 4))
+    devices = mesh_utils.create_device_mesh((1, 1))
     mesh = Mesh(devices, axis_names=("dp", "tp"))
 
     print("Creating sharded model")
@@ -72,7 +69,7 @@ def main(cfg: DictConfig):
         )
 
     print(output.logits.shape)
-    print(len(output.layers_outputs))
+    print(len(output.layers_outputs.z_loss.shape))
 
 
 if __name__ == "__main__":
