@@ -16,7 +16,7 @@ from xlstm_jax.blocks.slstm.block import sLSTMBlock
 PathLike = Path | str
 
 
-def get_moe_layer(layer_type: str):
+def get_moe_layer_type(layer_type: str):
     if layer_type == MoELayerType.mLSTM:
         from moxe.modules.mlstm_moe import mLSTMMoELayer
 
@@ -37,16 +37,34 @@ def get_moe_layer(layer_type: str):
     )
 
 
-def get_expert_modules(config: MoxEConfig, mesh: Mesh, rngs: nnx.Rngs, dtype=jnp):
+def get_expert_modules(
+    config: MoxEConfig,
+    mesh: Mesh,
+    rngs: nnx.Rngs,
+    dtype=jnp.bfloat16,
+    param_dtype=jnp.float32,
+):
     if config.expert_type == ExpertModule.MLP:
         return [
-            FeedForwardExpert(config, mesh=mesh, rngs=rngs, dtype=dtype)
+            FeedForwardExpert(
+                config,
+                mesh=mesh,
+                rngs=rngs,
+                dtype=dtype,
+                param_dtype=param_dtype,
+            )
             for _ in range(config.num_experts)
         ]
 
     elif config.expert_type == ExpertModule.mLSTM:
         return [
-            mLSTMBlock(config.xlstm.mlstm_block, mesh=mesh, rngs=rngs, dtype=dtype)
+            mLSTMBlock(
+                config.xlstm.mlstm_block,
+                mesh=mesh,
+                rngs=rngs,
+                dtype=dtype,
+                param_dtype=param_dtype,
+            )
             for _ in range(config.num_experts)
         ]
 
@@ -65,19 +83,37 @@ def get_expert_modules(config: MoxEConfig, mesh: Mesh, rngs: nnx.Rngs, dtype=jnp
 
         if config.expert_type == ExpertModule.sLSTM:
             return [
-                sLSTMBlock(__config.slstm_block, mesh=mesh, rngs=rngs, dtype=dtype)
+                sLSTMBlock(
+                    __config.slstm_block,
+                    mesh=mesh,
+                    rngs=rngs,
+                    dtype=dtype,
+                    param_dtype=param_dtype,
+                )
                 for _ in range(config.num_experts)
             ]
 
         expert_per_group = config.num_experts // 2
         mlstm_experts = [
-            mLSTMBlock(config.xlstm.mlstm_block, mesh=mesh, rngs=rngs, dtype=dtype)
+            mLSTMBlock(
+                config.xlstm.mlstm_block,
+                mesh=mesh,
+                rngs=rngs,
+                dtype=dtype,
+                param_dtype=param_dtype,
+            )
             for _ in range(expert_per_group)
         ]
 
         # blocks[0] otherwise an additional LayerNorm is added by xLSTMBlockStack
         sltm_experts = [
-            sLSTMBlock(__config.slstm_block, mesh=mesh, rngs=rngs, dtype=dtype)
+            sLSTMBlock(
+                __config.slstm_block,
+                mesh=mesh,
+                rngs=rngs,
+                dtype=dtype,
+                param_dtype=param_dtype,
+            )
             for _ in range(expert_per_group)
         ]
 

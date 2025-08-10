@@ -8,12 +8,12 @@ import typing as tp
 from dataclasses import asdict
 from pathlib import Path
 from pprint import pprint
+from typing import cast
 
 import grain.python as grain
 import hydra
 import jax
 import jax.numpy as jnp
-import jax.tree_util as jtu
 import optax
 import orbax.checkpoint as ocp
 from einops import rearrange
@@ -28,65 +28,29 @@ from transformers import (
     HfArgumentParser,
 )
 
-from moxe.config import MoxEConfig
-
-# from moxe.inference import GenerationCarry, generate_sequence_scan  # Unused imports
-from moxe.inference import GenerationCarry, generate_sequence_scan
-from moxe.modules.model import MoxEForCausalLM
-from moxe.output import ConditionedGateOutput, MoxEForwardPassOutput, MoxELayerOutput
-from moxe.tensorboard import TensorBoardLogger
-from moxe.training.arguments import CustomArgs
-from moxe.training.data import DataCollatatorTransform, create_dataloaders
-from moxe.training.helpers import apply_gradients, compute_training_steps
-from moxe.utils.array import create_mesh, log_node_devices_stats
-from moxe.utils.modules import (
+from src.data.grain import DataCollatatorTransform, create_dataloaders
+from src.trainer.base_arguments import BaseTrainingArgs
+from src.trainer.helpers import compute_training_steps
+from src.utils.devices import create_mesh, log_node_devices_stats
+from src.utils.inference import GenerationCarry, generate_sequence_scan
+from src.utils.modules import (
     checkpoint_post_eval,
-    count_parameters,
+    language_model_params_stats,
     load_sharded_checkpoint_state,
 )
+from src.utils.parser import parse_xlstm_config_dict
+from src.utils.tensorboard import TensorBoardLogger
+from xlstm_jax import xLSTMLMModel, xLSTMLMModelConfig
 from xlstm_jax.utils import str2dtype
 
 
-def _accumulate_loss(
-    outputs: tp.List[MoxELayerOutput | ConditionedGateOutput],
-    attr: str,
-):
-    """
-    Accumulates a specific loss attribute from a Pytree of layer outputs
-    in a way that is compatible with JAX tracing.
-    """
-
-    leaves_with_paths = jtu.tree_leaves_with_path(outputs)
-    total_loss = jnp.array(
-        [
-            leaf
-            for path, leaf in leaves_with_paths
-            if isinstance(path[-1], jtu.GetAttrKey) and path[-1].name == attr
-        ]
-    ).sum()
-
-    return total_loss
-
-
-def loss_fn(
-    model: MoxEForCausalLM,
-    batch: tuple[jax.Array, jax.Array],
-    z_loss_coef: float,
-    load_balancing_loss_coef: float,
-    d_loss_coef: float = 0.0,
-    group_loss_coef: float = 0.0,
-):
-    """Compute the loss for a batch of data including auxiliary MoE losses."""
+def loss_fn(model: xLSTMLMModel, batch: tuple[jax.Array, jax.Array]):
+    """Compute the loss for a batch of data."""
     input_ids, labels = batch
-    output = model(
-        input_ids,
-        compute_d_loss=d_loss_coef > 0.0,
-        compute_group_loss=group_loss_coef > 0.0,
-        return_layers_outputs=True,
-    )
+    output = model(input_ids)
 
     # shape: [batch, seq, vocab] -> [batch * (seq-1), vocab]
-    shifted_logits = rearrange(output.logits[..., :-1, :], "b s v -> (b s) v")
+    shifted_logits = rearrange(output[..., :-1, :], "b s v -> (b s) v")
 
     # shape: [batch, seq] -> [batch * (seq-1)]
     shifted_labels = rearrange(labels[..., 1:], "b s -> (b s)")
@@ -96,148 +60,39 @@ def loss_fn(
         logits=shifted_logits, labels=shifted_labels
     ).mean()
 
-    _dtype = ce_loss.dtype
-    total_loss = ce_loss
-
-    # Collect auxiliary losses
-    layers_outputs = output.layers_output
-    num_layers = model.moe.num_layers
-
-    z_loss = _accumulate_loss(layers_outputs, "z_loss")
-    z_loss = (z_loss / num_layers).astype(_dtype)
-
-    load_balancing_loss = _accumulate_loss(layers_outputs, "load_balancing_loss")
-    load_balancing_loss = (load_balancing_loss / num_layers).astype(_dtype)
-
-    # d-loss
-    d_loss: jax.Array = jax.lax.cond(
-        d_loss_coef > 0.0,
-        lambda: _accumulate_loss(layers_outputs, "d_loss").astype(_dtype),
-        lambda: jnp.zeros((), dtype=_dtype),
-    )
-
-    d_loss = d_loss / num_layers
-
-    # group-loss
-    group_loss: jax.Array = jax.lax.cond(
-        group_loss_coef > 0.0,
-        lambda: _accumulate_loss(layers_outputs, "group_loss").astype(_dtype),
-        lambda: jnp.zeros((), dtype=_dtype),
-    )
-
-    group_loss = group_loss / num_layers
-
-    # finalize
-    total_loss = (
-        total_loss
-        + z_loss_coef * z_loss
-        + load_balancing_loss_coef * load_balancing_loss
-        + d_loss * d_loss_coef
-        + group_loss * group_loss_coef
-    )
-
-    aux_data = MoxEForwardPassOutput(
-        ce_loss=ce_loss,
-        z_loss=z_loss,
-        load_balancing_loss=load_balancing_loss,
-        d_loss=d_loss,
-        group_loss=group_loss,
-        layers_output=layers_outputs,
-    )
-
-    return total_loss, aux_data
+    return ce_loss
 
 
-@functools.partial(
-    nnx.jit,
-    static_argnames=(
-        "z_loss_coef",
-        "load_balancing_loss_coef",
-        "d_loss_coef",
-        "group_loss_coef",
-    ),
-)
-def compute_grads_and_metrics(
-    model: MoxEForCausalLM,
+@nnx.jit
+def train_step(
+    model: xLSTMLMModel,
     metrics: nnx.MultiMetric,
     batch: tuple[jax.Array, jax.Array],
-    z_loss_coef: float,
-    load_balancing_loss_coef: float,
-    d_loss_coef: float = 0.0,
-    group_loss_coef: float = 0.0,
+    optimizer: nnx.Optimizer,
 ):
     """Computes gradients, loss, and updates metrics for a single micro-batch."""
+    grad_fn = nnx.value_and_grad(loss_fn)
+    loss, grads = grad_fn(model, batch)
 
-    def _loss_fn(model, batch):
-        total_loss, aux_losses = loss_fn(
-            model,
-            batch,
-            z_loss_coef,
-            load_balancing_loss_coef,
-            d_loss_coef,
-            group_loss_coef,
-        )
-        return total_loss, aux_losses
+    # Calculate metrics for this micro-batch
+    perplexity = jnp.exp(loss)
+    grad_norm = optax.global_norm(grads)  # Calculate gradient norm
+    optimizer.update(grads)
 
-    grad_fn = nnx.value_and_grad(_loss_fn, has_aux=True)
-    (loss, aux_data), grads = grad_fn(model, batch)
-
-    perplexity = jnp.exp(aux_data.ce_loss)
-    grad_norm = optax.global_norm(grads)
-
-    metrics.update(
-        loss=loss,
-        perplexity=perplexity,
-        grad_norm=grad_norm,
-        ce_loss=aux_data.ce_loss,
-        z_loss=aux_data.z_loss,
-        load_balancing_loss=aux_data.load_balancing_loss,
-        d_loss=aux_data.d_loss,
-        group_loss=aux_data.group_loss,
-    )
-
-    return loss, grads, grad_norm, aux_data.layers_outputs
+    metrics.update(loss=loss, perplexity=perplexity, grad_norm=grad_norm)
+    return loss, grad_norm
 
 
-@functools.partial(
-    nnx.jit,
-    static_argnames=(
-        "z_loss_coef",
-        "load_balancing_loss_coef",
-        "d_loss_coef",
-        "group_loss_coef",
-    ),
-)
+@nnx.jit
 def eval_step(
-    model: MoxEForCausalLM,
+    model: xLSTMLMModel,
     metrics: nnx.MultiMetric,
     batch: tuple[jax.Array, jax.Array],
-    z_loss_coef: float,
-    load_balancing_loss_coef: float,
-    d_loss_coef: float = 0.0,
-    group_loss_coef: float = 0.0,
 ):
     """Perform a single evaluation step."""
-    total_loss, aux_losses = loss_fn(
-        model,
-        batch,
-        z_loss_coef,
-        load_balancing_loss_coef,
-        d_loss_coef,
-        group_loss_coef,
-    )
-
-    perplexity = jnp.exp(aux_losses.ce_loss)
-
-    metrics.update(
-        loss=total_loss,
-        perplexity=perplexity,
-        ce_loss=aux_losses.ce_loss,
-        z_loss=aux_losses.z_loss,
-        load_balancing_loss=aux_losses.load_balancing_loss,
-        d_loss=aux_losses.d_loss,
-        group_loss=aux_losses.group_loss,
-    )
+    loss = loss_fn(model, batch)
+    perplexity = jnp.exp(loss)
+    metrics.update(loss=loss, perplexity=perplexity)
 
 
 @functools.partial(
@@ -245,14 +100,14 @@ def eval_step(
     static_argnames=("config_fn", "seed", "mesh", "dtype"),
 )
 def _create_sharded_model(
-    config_fn: callable,
+    config_fn: tp.Callable[[], xLSTMLMModelConfig],
     seed: int,
     mesh: Mesh,
     dtype=jnp.float32,
 ):
     rngs = nnx.Rngs(seed)
     config = config_fn()
-    model = MoxEForCausalLM(config, mesh=mesh, rngs=rngs, dtype=dtype)
+    model = xLSTMLMModel(config, mesh=mesh, rngs=rngs, dtype=dtype)
     state = nnx.state(model)
     pspecs = nnx.get_partition_spec(state)
     sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
@@ -261,9 +116,7 @@ def _create_sharded_model(
     return model
 
 
-@hydra.main(
-    config_path="./configs", config_name="train_moxe_config", version_base="1.1"
-)
+@hydra.main(config_path="../configs", config_name="train_xlstm", version_base="1.2")
 def main(cfg: DictConfig):
     # Set up logging
     logging.basicConfig(
@@ -271,13 +124,13 @@ def main(cfg: DictConfig):
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
     logger = logging.getLogger(__name__)
-    logger.info("Starting MoxE language model training...")
+    logger.info("Starting xLSTM language model training...")
 
-    parser = HfArgumentParser(CustomArgs)
+    parser = HfArgumentParser(BaseTrainingArgs)
 
     # Load trainer arguments from YAML file
     args = parser.parse_dict(OmegaConf.to_container(cfg["trainer"], resolve=True))[0]
-    args = tp.cast(CustomArgs, args)
+    args = cast(BaseTrainingArgs, args)
 
     # Set default warmup_ratio if not provided
     if not hasattr(args, "warmup_ratio"):
@@ -287,7 +140,7 @@ def main(cfg: DictConfig):
         )
 
     logger.info("Loading tokenizer...")
-    # Load tokenizer
+    # Load teacher model and tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer,
         token=args.hub_token,
@@ -304,25 +157,33 @@ def main(cfg: DictConfig):
         logger.warning("Changed the tokenizer's padding_side from right to left")
 
     config_dict = OmegaConf.to_container(cfg["model"], resolve=True)
-    config_dict["xlstm"]["vocab_size"] = tokenizer.vocab_size
-    config_dict["xlstm"]["pad_token_id"] = tokenizer.pad_token_id
-    logger.info("Model config:")
+    config_dict["vocab_size"] = tokenizer.vocab_size
+    config_dict["pad_token_id"] = tokenizer.pad_token_id
+
+    # I must find where this duplicate "xlstm" key is coming from
+    if "xlstm" in config_dict:
+        logger.warning("Found duplicate `xlstm` key in model config")
+        config_dict.pop("xlstm")
+
     pprint(config_dict)
 
-    config = MoxEConfig.from_dict(config_dict)
+    config = parse_xlstm_config_dict(config_dict)
+    config.pad_token_id = tokenizer.pad_token_id
+
+    print(config)
 
     log_node_devices_stats(logger)
 
     # Model instance
     dtype_str = cfg["dtype"]
-    logger.info(f"Creating MoxE model with dtype={dtype_str}...")
+    logger.info(f"Creating xLSTM model with dtype={dtype_str}...")
     dtype = str2dtype(dtype_str)
 
-    mesh_shape = tuple(args.mesh_shape) if hasattr(args, "mesh_shape") else (1,)
-    axis_names = tuple(args.axis_names) if hasattr(args, "axis_names") else ("dp",)
+    mesh_shape = tuple(args.mesh_shape) if hasattr(args, "mesh_shape") else (1, 1)
+    axis_names = tuple(args.axes_names) if hasattr(args, "axis_names") else ("dp", "tp")
     mesh = create_mesh(mesh_shape=mesh_shape, axis_names=axis_names)
 
-    model = None
+    model: tp.Optional[xLSTMLMModel] = None
     with mesh:
         model = _create_sharded_model(
             config_fn=lambda: config,
@@ -331,9 +192,14 @@ def main(cfg: DictConfig):
             dtype=dtype,
         )
 
-    logger.info(f"Model parameters: {count_parameters(model)}")
-    logger.info(f"Embedding size {count_parameters(model.moe.token_embedding)}")
-    logger.info(f"MoE layer size {count_parameters(model.moe.layers[0])}")
+    logger.info("Model parameters")
+    pprint(
+        language_model_params_stats(
+            embed=model.token_embedding,
+            lm_head=model.lm_head,
+            sequence_mixer=model.xlstm_block_stack,
+        )
+    )
 
     log_node_devices_stats(logger)
 
@@ -394,7 +260,7 @@ def main(cfg: DictConfig):
         logger=logger,
         args=args,
         tokenizer=tokenizer,
-        max_seq_length=config.xlstm.context_length,
+        max_seq_length=config.context_length,
         train_data_ops=train_data_ops,
         eval_data_ops=eval_data_ops,
     )
@@ -405,12 +271,23 @@ def main(cfg: DictConfig):
 
     logger.info(f"Dataset sizes - Train: {num_train_samples}, Eval: {num_eval_samples}")
     steps_dict = compute_training_steps(
-        args, num_train_samples, num_eval_samples, logger
+        args,
+        train_samples=num_train_samples,
+        eval_samples=num_eval_samples,
+        logger=logger,
     )
+
     max_steps = steps_dict["max_steps"]
     max_optimizer_steps = steps_dict["max_optimizer_steps"]
 
-    # Use optimizer steps for learning rate schedule
+    # Set default warmup_ratio if not provided
+    if not hasattr(args, "warmup_ratio"):
+        args.warmup_ratio = 0.2
+        logger.warning(
+            f"warmup_ratio not found in config, defaulting to {args.warmup_ratio}"
+        )
+
+    # Use optimizer steps for learning rate schedule (not micro-batch steps)
     warmup_steps = int(args.warmup_ratio * max_optimizer_steps)
     logger.info(
         f"Calculated warmup steps: {warmup_steps} ({args.warmup_ratio=}, max_optimizer_steps={max_optimizer_steps})"
@@ -451,33 +328,23 @@ def main(cfg: DictConfig):
         loss=nnx.metrics.Average("loss"),
         perplexity=nnx.metrics.Average("perplexity"),
         grad_norm=nnx.metrics.Average("grad_norm"),
-        ce_loss=nnx.metrics.Average("ce_loss"),
-        z_loss=nnx.metrics.Average("z_loss"),
-        load_balancing_loss=nnx.metrics.Average("load_balancing_loss"),
-        d_loss=nnx.metrics.Average("d_loss"),
-        group_loss=nnx.metrics.Average("group_loss"),
     )
 
     eval_metrics = nnx.MultiMetric(
         loss=nnx.metrics.Average("loss"),
         perplexity=nnx.metrics.Average("perplexity"),
-        ce_loss=nnx.metrics.Average("ce_loss"),
-        z_loss=nnx.metrics.Average("z_loss"),
-        load_balancing_loss=nnx.metrics.Average("load_balancing_loss"),
-        d_loss=nnx.metrics.Average("d_loss"),
-        group_loss=nnx.metrics.Average("group_loss"),
     )
 
     # TensorBoard logger
     tb_logger = TensorBoardLogger(log_dir=args.logging_dir, name="train")
 
     # Checkpoint manager
-    ckpt_dir = Path(args.logging_dir).absolute()
+    ckpt_dir = Path(cfg["checkpoint_save_dir"]).absolute()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    BEST_METRIC_KEY = "eval_perplexity"
+    BEST_METRIC_KEY: tp.Final[str] = "eval_loss"
     options = ocp.CheckpointManagerOptions(
-        max_to_keep=3,
+        max_to_keep=args.save_total_limit,
         best_fn=lambda metrics: metrics[BEST_METRIC_KEY],
         best_mode="min",
         create=True,
@@ -506,10 +373,6 @@ def main(cfg: DictConfig):
     )
     logger.info(f"Total steps = {max_steps}")
     logger.info(f"Total optimizer steps = {max_optimizer_steps}")
-    logger.info(f"Z-loss coefficient = {args.z_loss_coef}")
-    logger.info(f"Load balancing loss coefficient = {args.load_balancing_loss_coef}")
-    logger.info(f"D-loss coefficient = {args.d_loss_coef}")
-    logger.info(f"Group loss coefficient = {args.group_loss_coef}")
 
     # Start timing
     training_start_time = time.perf_counter()
@@ -521,13 +384,12 @@ def main(cfg: DictConfig):
         spec=PartitionSpec("dp", None),
     )
 
-    GENERATION_SAMPLES = ["Once upon a time", "There was a girl", "Next to the tree"]
+    GENERATION_SAMPLES = ["Na tafi gida", "Darasi na rana", "Duk kun yi rashin lafiya"]
     MAX_NEW_TOKENS = 100
     GREEDY = False
     TEMPERATURE = 0.85
 
     for epoch in range(args.num_train_epochs):
-        model.train()
         epoch_start_time = time.perf_counter()
         logger.info(f"Starting Epoch {epoch + 1}/{args.num_train_epochs}")
         train_metrics.reset()
@@ -559,17 +421,14 @@ def main(cfg: DictConfig):
                 _batch = (input_ids, labels)
 
                 # Compute gradients and metrics
-                loss, grads, grad_norm, layers_outputs = compute_grads_and_metrics(
+                loss, grad_norm = train_step(
                     model=model,
+                    optimizer=optimizer,
                     metrics=train_metrics,
                     batch=_batch,
-                    z_loss_coef=args.z_loss_coef,
-                    load_balancing_loss_coef=args.load_balancing_loss_coef,
-                    d_loss_coef=args.d_loss_coef,
-                    group_loss_coef=args.group_loss_coef,
                 )
 
-                apply_gradients(optimizer, grads)
+                # apply_gradients(optimizer, grads)
 
                 # Check if it's time for optimizer step
                 is_update_step = (step + 1) % args.gradient_accumulation_steps == 0
@@ -587,8 +446,6 @@ def main(cfg: DictConfig):
                     # Log metrics to TensorBoard
                     for metric, value in computed_metrics.items():
                         tb_logger.log_scalar(f"train/{metric}", value, global_step)
-
-                    tb_logger.write_moe_layers_metrics(layers_outputs, global_step)
 
                     train_metrics.reset()
 
@@ -616,8 +473,7 @@ def main(cfg: DictConfig):
                 pbar.set_postfix(postfix_data)
                 pbar.update(1)
 
-        # --- Evaluation after each epoch ---
-        model.eval()
+            # --- Evaluation after each epoch ---
         eval_start_time = time.perf_counter()
         logger.info(f"Starting evaluation after epoch {epoch + 1}...")
         eval_metrics.reset()
@@ -632,29 +488,21 @@ def main(cfg: DictConfig):
                 leave=False,
             ):
                 eval_batch_count += 1
-                input_ids = jnp.array(batch["input_ids"])
-                labels = jnp.array(batch["labels"], dtype=jnp.int32)
+            input_ids = jnp.array(batch["input_ids"])
+            labels = jnp.array(batch["labels"], dtype=jnp.int32)
 
-                if input_ids.ndim == 3 and input_ids.shape[0] == 1:
-                    input_ids = input_ids.squeeze(0)
+            if input_ids.ndim == 3 and input_ids.shape[0] == 1:
+                input_ids = input_ids.squeeze(0)
 
-                if labels.ndim == 3 and labels.shape[0] == 1:
-                    labels = labels.squeeze(0)
+            if labels.ndim == 3 and labels.shape[0] == 1:
+                labels = labels.squeeze(0)
 
-                # Apply data sharding
-                input_ids = jax.device_put(input_ids, DATA_SHARDING)
-                labels = jax.device_put(labels, DATA_SHARDING)
-                _batch = (input_ids, labels)
+            # Apply data sharding
+            input_ids = jax.device_put(input_ids, DATA_SHARDING)
+            labels = jax.device_put(labels, DATA_SHARDING)
+            _batch = (input_ids, labels)
 
-                eval_step(
-                    model=model,
-                    metrics=eval_metrics,
-                    batch=_batch,
-                    z_loss_coef=args.z_loss_coef,
-                    load_balancing_loss_coef=args.load_balancing_loss_coef,
-                    d_loss_coef=args.d_loss_coef,
-                    group_loss_coef=args.group_loss_coef,
-                )
+            eval_step(model=model, metrics=eval_metrics, batch=_batch)
         except Exception as e:
             logger.error(f"Error during evaluation: {e}")
             eval_data_available = False
@@ -696,7 +544,7 @@ def main(cfg: DictConfig):
                 model,
                 initial_carry,
                 max_new_tokens=MAX_NEW_TOKENS,
-                vocab_size=config.xlstm.vocab_size,
+                vocab_size=config.vocab_size,
                 temperature=TEMPERATURE,
                 greedy=GREEDY,
             )
@@ -749,18 +597,6 @@ def main(cfg: DictConfig):
                 current_lr = cosine_schedule(global_optimizer_step)
                 tb_logger.log_learning_rate(current_lr, global_optimizer_step)
                 logger.info(f"Final learning rate: {current_lr:.2e}")
-
-                # Log final auxiliary loss breakdown
-                logger.info("Final Training Metrics:")
-                logger.info(f"  Total Loss: {final_computed_metrics['loss']:.6f}")
-                logger.info(f"  CE Loss: {final_computed_metrics['ce_loss']:.6f}")
-                logger.info(f"  Z Loss: {final_computed_metrics['z_loss']:.6f}")
-                logger.info(
-                    f"  Load Balancing Loss: {final_computed_metrics['load_balancing_loss']:.6f}"
-                )
-                logger.info(f"  D Loss: {final_computed_metrics['d_loss']:.6f}")
-                logger.info(f"  Group Loss: {final_computed_metrics['group_loss']:.6f}")
-                logger.info(f"  Perplexity: {final_computed_metrics['perplexity']:.4f}")
         except Exception as e:
             logger.warning(f"Could not compute final training metrics: {e}")
 
@@ -805,12 +641,6 @@ def main(cfg: DictConfig):
         "num_epochs_completed": len(epoch_durations),
         "global_steps": global_step,
         "global_optimizer_steps": global_optimizer_step,
-        "auxiliary_loss_coefficients": {
-            "z_loss_coef": args.z_loss_coef,
-            "load_balancing_loss_coef": args.load_balancing_loss_coef,
-            "d_loss_coef": args.d_loss_coef,
-            "group_loss_coef": args.group_loss_coef,
-        },
     }
     with open(artifacts_dir / "train_history.json", "w") as f:
         json.dump(training_summary, f, indent=4)
@@ -818,7 +648,7 @@ def main(cfg: DictConfig):
 
     # Save model config
     with open(artifacts_dir / "config.json", "w") as f:
-        json.dump(config.to_dict(), f, indent=4)
+        json.dump(asdict(config), f, indent=4)
     logger.info(f"Model config saved to {artifacts_dir / 'config.json'}")
 
     # Save trainer config
@@ -919,7 +749,7 @@ def main(cfg: DictConfig):
             folder_path=artifacts_dir,
             token=args.hub_token,
             commit_message=cfg.get(
-                "upload_message", "MoxE language model training completed"
+                "upload_message", "xLSTM language model training completed"
             ),
         )
         logger.info("Push to Hub completed.")

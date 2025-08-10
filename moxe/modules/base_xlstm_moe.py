@@ -6,6 +6,8 @@ from jax.sharding import Mesh
 
 from moxe.config import MoxEConfig
 from moxe.modules.gate import StandardMoEGate
+from moxe.ops import auxiliary_load_balancing_loss, router_z_loss
+from moxe.output import BaseMoELayerOutput
 from xlstm_jax.xlstm_block_stack import xLSTMBlockStack
 
 
@@ -19,12 +21,19 @@ class xLSTMMoELayer(nnx.Module):
         *,
         mesh: Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ) -> None:
         self.top_k = config.top_k_experts
         self.num_experts = config.num_experts
 
-        self.gate = StandardMoEGate(config, mesh=mesh, rngs=rngs, dtype=dtype)
+        self.gate = StandardMoEGate(
+            config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )
 
     # code adapted from transformers.models.mixtral.modeling_mixtral.py
     def __call__(self, h_t: jax.Array, *args):
@@ -80,4 +89,23 @@ class xLSTMMoELayer(nnx.Module):
         # reshape back to 3D
         final_hidden_states = final_outputs.reshape(B, S, D)
 
-        return final_hidden_states
+        # ---------------- Auxiliary lossess ---------------------------
+        z_loss = router_z_loss(router_logits)
+
+        load_balancing_loss, expert_load, expert_token_counts = (
+            auxiliary_load_balancing_loss(
+                num_experts=self.num_experts,
+                router_probs=router_probs,
+                top_k=self.top_k,
+            )
+        )
+
+        return BaseMoELayerOutput(
+            router_logits=router_logits,
+            router_probs=router_probs,
+            hidden_states=final_hidden_states,
+            z_loss=z_loss,
+            load_balancing_loss=load_balancing_loss,
+            expert_load=expert_load,
+            expert_token_counts=expert_token_counts,
+        )

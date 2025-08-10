@@ -12,7 +12,8 @@ class FeedForwardExpert(nnx.Module):
         *,
         mesh: jax.sharding.Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ):
         self.hidden_dim = config.xlstm.embedding_dim
         self.ffn_dim = 2 * self.hidden_dim
@@ -22,7 +23,7 @@ class FeedForwardExpert(nnx.Module):
             self.ffn_dim,
             use_bias=False,
             dtype=dtype,
-            param_dtype=dtype,
+            param_dtype=param_dtype,
             rngs=rngs,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.lecun_normal(),
@@ -36,7 +37,7 @@ class FeedForwardExpert(nnx.Module):
             self.hidden_dim,
             use_bias=False,
             dtype=dtype,
-            param_dtype=dtype,
+            param_dtype=param_dtype,
             rngs=rngs,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.lecun_normal(),
@@ -50,7 +51,7 @@ class FeedForwardExpert(nnx.Module):
             self.ffn_dim,
             use_bias=False,
             dtype=dtype,
-            param_dtype=dtype,
+            param_dtype=param_dtype,
             rngs=rngs,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.lecun_normal(),

@@ -102,9 +102,13 @@ class ConditionedGateOutput:
 
 
 @struct.dataclass(unsafe_hash=True, order=True)
-class MoELayerOutput:
+class BaseMoELayerOutput:
     """
     This class is used to store the output of the MoE layer.
+
+    Metrics are accumulated batch-wise using jax.lax.scan. In other words,
+    for a 4-layer MoxE model, the z_loss property will be an array of shape=(4,),
+    one scalar per layer.
 
     Args:
     - **router_logits**: The logits of the router layer of shape `(B*S, num_experts)`.
@@ -121,10 +125,14 @@ class MoELayerOutput:
 
 
 @struct.dataclass(unsafe_hash=True, order=True)
-class MoxELayerOutput(MoELayerOutput):
+class MoxELayerOutput(BaseMoELayerOutput):
     """
     This class is used to store the output of a MoxE layer. It inherits properties from
     the dataclass MoELayerOutput.
+
+    Metrics are accumulated batch-wise using jax.lax.scan. In other words,
+    for a 4-layer MoxE model, the z_loss property will be an array of shape=(4,),
+    one scalar per layer.
 
     """
 
@@ -134,14 +142,14 @@ class MoxELayerOutput(MoELayerOutput):
 @struct.dataclass(unsafe_hash=True, order=True)
 class MoxEModelOutput:
     hidden_states: jax.Array
-    layers_output: tp.Union[MoELayerOutput, MoxELayerOutput]
+    layers_output: tp.Union[BaseMoELayerOutput, MoxELayerOutput]
 
 
 @struct.dataclass(unsafe_hash=True, order=True)
 class MoxEForCausalLMOutput:
     logits: jax.Array
     hidden_states: tp.Optional[jax.Array] = None
-    layers_output: tp.Union[MoELayerOutput, MoxELayerOutput] = None
+    layers_output: tp.Union[BaseMoELayerOutput, MoxELayerOutput] = None
 
 
 @struct.dataclass(unsafe_hash=True, order=True)
@@ -151,4 +159,4 @@ class MoxEForwardPassOutput:
     load_balancing_loss: jax.Array
     d_loss: jax.Array
     group_loss: jax.Array
-    layers_output: tp.Union[MoELayerOutput, MoxELayerOutput]
+    layers_output: tp.Union[BaseMoELayerOutput, MoxELayerOutput]

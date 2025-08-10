@@ -61,7 +61,8 @@ class BiasConditionedGate(nnx.Module):
         *,
         mesh: Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ):
         self.gamma = config.gamma
         self.num_experts = config.num_experts
@@ -72,9 +73,9 @@ class BiasConditionedGate(nnx.Module):
         self.entropy_predictor = nnx.Linear(
             in_features=config.xlstm.embedding_dim,
             out_features=1,
-            dtype=dtype,
-            param_dtype=dtype,
             rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.lecun_normal(),
                 sharding=(None, None),
@@ -91,9 +92,9 @@ class BiasConditionedGate(nnx.Module):
             in_features=config.xlstm.embedding_dim,
             out_features=self.num_experts,
             use_bias=config.gate_bias,
-            dtype=dtype,
-            param_dtype=dtype,
             rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.lecun_normal(),
                 sharding=(None, "tp"),
@@ -201,7 +202,8 @@ class StandardMoEGate(nnx.Module):
         *,
         mesh: Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ):
         self.num_experts = config.num_experts
 
@@ -209,9 +211,9 @@ class StandardMoEGate(nnx.Module):
             in_features=config.xlstm.embedding_dim,
             out_features=self.num_experts,
             use_bias=config.gate_bias,
-            dtype=dtype,
-            param_dtype=dtype,
             rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.lecun_normal(),
                 sharding=(None, "tp"),
@@ -226,5 +228,4 @@ class StandardMoEGate(nnx.Module):
 
     def __call__(self, h_t: jax.Array):
         gate_logits = self.router(h_t.reshape(-1, h_t.shape[-1]))
-        # router_probs = jax.nn.softmax(gate_logits)
         return gate_logits

@@ -18,9 +18,16 @@ class mLSTMMoELayer(xLSTMMoELayer):
         *,
         mesh: Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
-    ) -> None:
-        super().__init__(config, mesh=mesh, rngs=rngs, dtype=dtype)
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
+    ):
+        super().__init__(
+            config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )
 
         # use only mLSTM blocks as a sequence mixer for this kind of layer
         mixer_config = deepcopy(config.xlstm)
@@ -28,8 +35,19 @@ class mLSTMMoELayer(xLSTMMoELayer):
         mixer_config.slstm_at = []
         _block_map = [0, 0]
         mixer_config._block_map = ",".join(map(str, _block_map))
+
         self.sequence_mixer = xLSTMBlockStack(
-            mixer_config, mesh=mesh, rngs=rngs, dtype=dtype
+            mixer_config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
         )
 
-        self.experts = get_expert_modules(config, mesh=mesh, rngs=rngs, dtype=dtype)
+        self.experts = get_expert_modules(
+            config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )

@@ -12,7 +12,7 @@ from ..config import MoxEConfig
 from ..ops import auxiliary_load_balancing_loss, router_z_loss
 from ..output import ConditionedGateOutput, MoxELayerOutput, SparsityGateType
 from ..utils.types import get_expert_modules
-from .gate import BiasConditionedGate
+from .gate import BiasConditionedGate, StandardMoEGate
 
 
 class MoxELayer(nnx.Module):
@@ -22,7 +22,8 @@ class MoxELayer(nnx.Module):
         *,
         mesh: Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ):
         assert config.num_experts % 2 == 0, "num_experts must be even"
         assert config.num_experts > 0, "At least 2 experts per layer"
@@ -38,41 +39,56 @@ class MoxELayer(nnx.Module):
         mixer_config.slstm_at = [0]
         _block_map = [1, 0]
         mixer_config._block_map = ",".join(map(str, _block_map))
+
         self.sequence_mixer = xLSTMBlockStack(
-            mixer_config, mesh=mesh, rngs=rngs, dtype=dtype
+            mixer_config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
         )
 
-        self.gate = self.__create_router(config, mesh=mesh, rngs=rngs, dtype=dtype)
-        self.experts = get_expert_modules(config, mesh=mesh, rngs=rngs, dtype=dtype)
+        self.gate = self.__create_router(
+            config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )
+
+        self.experts = get_expert_modules(
+            config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )
 
     def __create_router(
         self,
         config: MoxEConfig,
         mesh: Mesh,
         rngs: nnx.Rngs,
-        dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        param_dtype=jnp.float32,
     ):
         match config.router_type:
             case SparsityGateType.CONDITIONED_ADDITION:
-                return BiasConditionedGate(config, mesh=mesh, rngs=rngs, dtype=dtype)
-            case SparsityGateType.STANDARD:
-                return nnx.Linear(
-                    config.xlstm.embedding_dim,
-                    self.num_experts,
-                    bias=config.gate_bias,
-                    dtype=dtype,
-                    param_dtype=dtype,
+                return BiasConditionedGate(
+                    config,
+                    mesh=mesh,
                     rngs=rngs,
-                    kernel_init=nnx.with_partitioning(
-                        nnx.initializers.lecun_normal(),
-                        sharding=(None, "tp"),
-                        mesh=mesh,
-                    ),
-                    bias_init=nnx.with_partitioning(
-                        nnx.initializers.zeros_init(),
-                        sharding=("tp",),
-                        mesh=mesh,
-                    ),
+                    dtype=dtype,
+                    param_dtype=param_dtype,
+                )
+
+            case SparsityGateType.STANDARD:
+                return StandardMoEGate(
+                    config,
+                    mesh=mesh,
+                    rngs=rngs,
+                    dtype=dtype,
+                    param_dtype=param_dtype,
                 )
 
         raise ValueError(
@@ -86,9 +102,11 @@ class MoxELayer(nnx.Module):
         compute_d_loss: bool = True,
         compute_group_loss: bool = True,
     ):
-        h_t, _ = self.sequence_mixer(h_t)
         B, S, D = h_t.shape
-        gate_logits: jax.Array | None = None  # (B*S, E)
+
+        h_t, _ = self.sequence_mixer(h_t)
+
+        gate_logits: jax.Array  # (B*S, E)
         gate_output: ConditionedGateOutput | None = None
 
         if isinstance(self.gate, BiasConditionedGate):
@@ -99,8 +117,7 @@ class MoxELayer(nnx.Module):
             )
             gate_logits = gate_output.conditioned_logits
         else:
-            flat_h_t = h_t.reshape(-1, D)
-            gate_logits = self.gate(flat_h_t)
+            gate_logits = self.gate(h_t)
 
         router_probs = jax.nn.softmax(gate_logits, axis=1)
         top_k_weights, top_k_indices = lax.top_k(router_probs, self.top_k)
@@ -164,9 +181,9 @@ class MoxELayer(nnx.Module):
             router_logits=gate_logits,
             router_probs=router_probs,
             hidden_states=final_hidden_states,
-            conditioned_output=gate_output,
             z_loss=z_loss,
             load_balancing_loss=load_balancing_loss,
             expert_load=expert_load,
             expert_token_counts=expert_token_counts,
+            conditioned_output=gate_output,
         )
