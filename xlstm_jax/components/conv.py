@@ -1,8 +1,8 @@
 # Copyright (c) NXAI GmbH and its affiliates 2024
 # Maximilian Beck, Korbinian Pöppel
 # Converted to JAX/Flax by Abdoul Majid O. Thiombiano
+import typing as tp
 from dataclasses import dataclass, field
-from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -16,7 +16,7 @@ class CausalConv1dConfig:
     kernel_size: int = 4
     causal_conv_bias: bool = True
     channel_mixing: bool = False
-    conv1d_kwargs: dict[str, Any] = field(default_factory=dict)
+    conv1d_kwargs: dict[str, tp.Any] = field(default_factory=dict)
 
     def __post_init__(self):
         assert self.kernel_size >= 0, "kernel_size must be >= 0"
@@ -38,6 +38,8 @@ class CausalConv1d(nnx.Module):
                         If False, all the features are convolved independently.
     """
 
+    conv: tp.Callable[[jax.Array], jax.Array] | nnx.Conv
+
     def __init__(
         self,
         config: CausalConv1dConfig,
@@ -54,7 +56,7 @@ class CausalConv1d(nnx.Module):
             self.groups = 1
 
         if config.kernel_size == 0:
-            self.conv = None
+            self.conv = jax.nn.identity
         else:
             # padding of this size assures temporal causality.
             self.pad = config.kernel_size - 1
@@ -62,7 +64,7 @@ class CausalConv1d(nnx.Module):
                 in_features=config.feature_dim,
                 out_features=config.feature_dim,
                 kernel_size=(config.kernel_size,),
-                padding=[(self.pad, 0)],
+                padding="CAUSAL",
                 feature_group_count=self.groups,
                 use_bias=config.causal_conv_bias,
                 rngs=rngs,

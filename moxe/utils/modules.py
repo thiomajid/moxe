@@ -16,14 +16,15 @@ from moxe.output import MoELayerType
 from moxe.tensorboard import TensorBoardLogger
 
 
-@nnx.vmap(in_axes=(None, None, None, 0, None), out_axes=0)
+@nnx.vmap(in_axes=(None, 0, None, None), out_axes=0)
 def _create_moxe_layers(
     config: MoxEConfig,
-    layer_type: str,
-    mesh: jax.sharding.Mesh,
     rngs: nnx.Rngs,
+    mesh: jax.sharding.Mesh,
     dtype=jnp.float32,
 ):
+    layer_type = config.moe_layer_type
+
     if layer_type == MoELayerType.mLSTM:
         return mLSTMMoELayer(config, mesh=mesh, rngs=rngs, dtype=dtype)
     elif layer_type == MoELayerType.sLSTM:

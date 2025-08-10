@@ -69,7 +69,9 @@ def create_test_config() -> xLSTMLMModelConfig:
         add_post_blocks_norm=True,
         bias=False,
         dropout=0.0,
-        slstm_at=[1, 3],  # sLSTM blocks at positions 1 and 3
+        slstm_at=[],  # sLSTM blocks at positions 1 and 3
+        # slstm_at="all",
+        # slstm_at=[1, 3],
         mlstm_block=mlstm_block_config,
         slstm_block=slstm_block_config,
         tie_weights=False,
@@ -196,6 +198,7 @@ def main():
     print()
 
     # Set up JAX for CPU (remove XLA_FLAGS for GPU)
+    USE_JIT = True
     os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=1"
 
     # Create configuration
@@ -203,19 +206,22 @@ def main():
     print("✓ Configuration created")
 
     # Create mesh for model parallelism (using 1 device for simplicity)
-    devices = mesh_utils.create_device_mesh((1, 1))
-    mesh = Mesh(devices, axis_names=("dp", "tp"))
+    devices = mesh_utils.create_device_mesh((1, 1, 1))
+    mesh = Mesh(devices, axis_names=("dp", "tp", "debug"))
 
     print("✓ Device mesh created")
 
     # Create model
     with mesh:
         model = create_model(config, mesh)
-
     print("✓ Model created")
 
     # Count parameters
     print(f"✓ Model initialized with {count_parameters(model).millions} parameters")
+
+    if USE_JIT:
+        print("Jitting the model")
+        model = nnx.jit(model)
 
     # Test basic inference
     print("\n" + "=" * 50)

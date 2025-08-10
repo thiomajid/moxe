@@ -49,7 +49,7 @@ def forward(model: MoxEForCausalLM, encodings: jax.Array):
         compute_group_loss=True,
     )
     _dtype = outputs.logits.dtype
-    layers_outputs = outputs.layers_outputs
+    layers_outputs = outputs.layers_output
     num_layers = model.moe.num_layers
 
     z_loss = _accumulate_loss(layers_outputs, "z_loss")

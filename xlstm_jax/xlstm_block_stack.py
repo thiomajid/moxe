@@ -78,53 +78,6 @@ class xLSTMBlockStackConfig:
         self._block_map = self._create_block_map()
 
 
-# @nnx.vmap(in_axes=(0, 0, None, None, None), out_axes=0)
-def _slstm_blocks_vmap(
-    configs: sLSTMBlockConfig,
-    rngs: nnx.Rngs,
-    mesh: jax.sharding.Mesh,
-    dtype=jnp.bfloat16,
-    param_dtype=jnp.float32,
-):
-    blocks = [
-        sLSTMBlock(
-            config=block_config,
-            rngs=rngs,
-            mesh=mesh,
-            dtype=dtype,
-            param_dtype=param_dtype,
-        )
-        for block_config in configs
-    ]
-
-    return blocks
-
-    # return sLSTMBlock(
-    #     config=block_config,
-    #     rngs=rngs,
-    #     mesh=mesh,
-    #     dtype=dtype,
-    #     param_dtype=param_dtype,
-    # )
-
-
-@nnx.vmap(in_axes=(None, 0, None, None, None), out_axes=0)
-def _mlstm_blocks_vmap(
-    block_config: mLSTMBlockConfig,
-    rngs: nnx.Rngs,
-    mesh: jax.sharding.Mesh,
-    dtype=jnp.bfloat16,
-    param_dtype=jnp.float32,
-):
-    return mLSTMBlock(
-        config=block_config,
-        rngs=rngs,
-        mesh=mesh,
-        dtype=dtype,
-        param_dtype=param_dtype,
-    )
-
-
 def _create_blocks(
     config: xLSTMBlockStackConfig,
     mesh: jax.sharding.Mesh,
@@ -132,37 +85,6 @@ def _create_blocks(
     dtype=jnp.bfloat16,
     param_dtype=jnp.float32,
 ):
-    if all(idx == 0 for idx in config.block_map):
-        block_config = deepcopy(config.mlstm_block)
-        block_config.__post_init__()
-
-        return _mlstm_blocks_vmap(
-            block_config,
-            rngs.fork(split=len(config.block_map)),
-            mesh,
-            dtype,
-            param_dtype,
-        )
-    elif all(idx == 1 for idx in config.block_map):
-        slstm_configs = []
-
-        for block_idx, block_type_int in enumerate(config.block_map):
-            block_config = deepcopy(config.slstm_block)
-            if hasattr(block_config, "_block_idx"):
-                block_config._block_idx = block_idx
-                block_config.__post_init__()
-
-            slstm_configs.append(block_config)
-
-        return _slstm_blocks_vmap(
-            slstm_configs,
-            rngs,
-            # rngs.fork(split=len(config.block_map)),
-            mesh,
-            dtype,
-            param_dtype,
-        )
-
     blocks: list[mLSTMBlock | sLSTMBlock] = []
     for block_idx, block_type_int in enumerate(config.block_map):
         if block_type_int == 0:
@@ -201,12 +123,6 @@ def _create_blocks(
     return blocks
 
 
-@nnx.scan(in_axes=(0, nnx.Carry), out_axes=(nnx.Carry, 0))
-def _scan_over_blocks(block: mLSTMBlock | sLSTMBlock, carry: jax.Array):
-    next_state = block(carry)
-    return next_state, next_state
-
-
 class xLSTMBlockStack(nnx.Module):
     """Stack of xLSTM blocks that can be either mLSTM or sLSTM blocks.
 
@@ -225,8 +141,8 @@ class xLSTMBlockStack(nnx.Module):
         dtype=jnp.bfloat16,
         param_dtype=jnp.float32,
     ):
-        self.has_uniform_blocks = len(config.slstm_at) == 0
         self.num_blocks = config.num_blocks
+        self.has_uniform_blocks = len(config.slstm_at) == 0 or config.slstm_at == "all"
 
         self.blocks = _create_blocks(
             config=config,
@@ -259,21 +175,15 @@ class xLSTMBlockStack(nnx.Module):
             Processed output tensor of shape [B, S, D] and hidden states per block
         """
 
-        def _mixed_block_scan(carry: jax.Array, block_idx: jax.Array):
+        def _block_scan(carry: jax.Array, block_idx: jax.Array):
             next_state = jax.lax.switch(block_idx, self.blocks, carry)
             return next_state, next_state
 
-        x_t: jax.Array
-        h_t: jax.Array
-
-        if self.has_uniform_blocks:
-            x_t, h_t = _scan_over_blocks(self.blocks, x)
-        else:
-            x_t, h_t = jax.lax.scan(
-                f=_mixed_block_scan,
-                init=x,
-                xs=jnp.arange(self.num_blocks),
-            )
+        x_t, h_t = jax.lax.scan(
+            f=_block_scan,
+            init=x,
+            xs=jnp.arange(self.num_blocks),
+        )
 
         x_t = self.post_blocks_norm(x_t)
 

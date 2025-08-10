@@ -63,15 +63,15 @@ class GroupWiseLossFn:
         ]
 
 
-def str2modulation_bias(s: str) -> int:
-    if s == "standard":
+def str2modulation_bias(modulation: str) -> int:
+    if modulation == "standard":
         return ModulationBias.STANDARD
-    elif s == "masked":
+    elif modulation == "masked":
         return ModulationBias.MASKED
-    elif s == "proportional":
+    elif modulation == "proportional":
         return ModulationBias.PROPORTIONAL
     else:
-        raise ValueError(f"Unknown modulation bias: {s}")
+        raise ValueError(f"Unknown modulation bias: {modulation}")
 
 
 class ModulationBias:
@@ -102,14 +102,13 @@ class ConditionedGateOutput:
 
 
 @struct.dataclass(unsafe_hash=True, order=True)
-class MoxELayerOutput:
+class MoELayerOutput:
     """
     This class is used to store the output of the MoE layer.
 
     Args:
     - **router_logits**: The logits of the router layer of shape `(B*S, num_experts)`.
     - **hidden_states**: The hidden states of shape `(B, S, hidden_dim)`.
-    - **conditioned_output**: The output of the conditioned gate layer of type `ConditionedGateOutput`.
     """
 
     router_logits: jax.Array
@@ -119,20 +118,30 @@ class MoxELayerOutput:
     load_balancing_loss: jax.Array
     expert_load: jax.Array
     expert_token_counts: jax.Array
+
+
+@struct.dataclass(unsafe_hash=True, order=True)
+class MoxELayerOutput(MoELayerOutput):
+    """
+    This class is used to store the output of a MoxE layer. It inherits properties from
+    the dataclass MoELayerOutput.
+
+    """
+
     conditioned_output: tp.Optional[ConditionedGateOutput] = None
 
 
 @struct.dataclass(unsafe_hash=True, order=True)
 class MoxEModelOutput:
     hidden_states: jax.Array
-    layers_outputs: tp.Optional[tuple[MoxELayerOutput]] = None
+    layers_output: tp.Union[MoELayerOutput, MoxELayerOutput]
 
 
 @struct.dataclass(unsafe_hash=True, order=True)
-class MoxECausalLMOutput:
+class MoxEForCausalLMOutput:
     logits: jax.Array
     hidden_states: tp.Optional[jax.Array] = None
-    layers_outputs: tp.Optional[tuple[MoxELayerOutput]] = None
+    layers_output: tp.Union[MoELayerOutput, MoxELayerOutput] = None
 
 
 @struct.dataclass(unsafe_hash=True, order=True)
@@ -142,4 +151,4 @@ class MoxEForwardPassOutput:
     load_balancing_loss: jax.Array
     d_loss: jax.Array
     group_loss: jax.Array
-    layers_outputs: tuple[MoxELayerOutput]
+    layers_output: tp.Union[MoELayerOutput, MoxELayerOutput]

@@ -100,7 +100,7 @@ def loss_fn(
     total_loss = ce_loss
 
     # Collect auxiliary losses
-    layers_outputs = output.layers_outputs
+    layers_outputs = output.layers_output
     num_layers = model.moe.num_layers
 
     z_loss = _accumulate_loss(layers_outputs, "z_loss")
@@ -142,7 +142,7 @@ def loss_fn(
         load_balancing_loss=load_balancing_loss,
         d_loss=d_loss,
         group_loss=group_loss,
-        layers_outputs=layers_outputs,
+        layers_output=layers_outputs,
     )
 
     return total_loss, aux_data

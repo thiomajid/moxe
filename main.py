@@ -1,6 +1,11 @@
+import os
+
+from moxe.output import MoxEForCausalLMOutput
+
+os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
+
 from functools import partial
 
-# os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 import hydra
 import jax
 import jax.numpy as jnp
@@ -27,7 +32,7 @@ def create_sharded_model(mesh: Mesh, config: MoxEConfig):
     return model
 
 
-@hydra.main(config_path="./configs", config_name="config", version_base="1.1")
+@hydra.main(config_path="./configs", config_name="config", version_base="1.2")
 def main(cfg: DictConfig):
     config = MoxEConfig.from_dict(OmegaConf.to_container(cfg["model"], resolve=True))
     USE_JIT = True
@@ -41,7 +46,7 @@ def main(cfg: DictConfig):
     )
 
     print("Creating device mesh")
-    devices = mesh_utils.create_device_mesh((1, 1))
+    devices = mesh_utils.create_device_mesh((1, 8))
     mesh = Mesh(devices, axis_names=("dp", "tp"))
 
     print("Creating sharded model")
@@ -50,26 +55,17 @@ def main(cfg: DictConfig):
 
     print(count_parameters(model))
 
-    jitted_model = nnx.jit(model)
-
-    output = None
     if USE_JIT:
-        output = jitted_model(
-            dummy_input,
-            compute_d_loss=True,
-            compute_group_loss=True,
-            return_layers_outputs=True,
-        )
-    else:
-        output = model(
-            dummy_input,
-            compute_d_loss=True,
-            compute_group_loss=True,
-            return_layers_outputs=True,
-        )
+        model = nnx.jit(model)
+
+    output: MoxEForCausalLMOutput = model(
+        dummy_input,
+        compute_d_loss=True,
+        compute_group_loss=True,
+    )
 
     print(output.logits.shape)
-    print(len(output.layers_outputs.z_loss.shape))
+    print(output.layers_output.z_loss)
 
 
 if __name__ == "__main__":
