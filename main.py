@@ -1,6 +1,7 @@
 import os
 
 from moxe.output import MoxEForCausalLMOutput
+from moxe.utils.array import create_mesh
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 
@@ -10,7 +11,6 @@ import hydra
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from omegaconf import DictConfig, OmegaConf
 
@@ -22,7 +22,13 @@ from moxe.utils.modules import count_parameters
 @partial(nnx.jit, static_argnums=(0, 1))
 def create_sharded_model(mesh: Mesh, config: MoxEConfig):
     rngs = nnx.Rngs(jax.random.key(123))
-    model = MoxEForCausalLM(config, mesh=mesh, rngs=rngs, dtype=jnp.float32)
+    model = MoxEForCausalLM(
+        config,
+        mesh=mesh,
+        rngs=rngs,
+        dtype=jnp.float16,
+        param_dtype=jnp.float32,
+    )
 
     state = nnx.state(model)
     pspecs = nnx.get_partition_spec(state)
@@ -46,8 +52,7 @@ def main(cfg: DictConfig):
     )
 
     print("Creating device mesh")
-    devices = mesh_utils.create_device_mesh((1, 8))
-    mesh = Mesh(devices, axis_names=("dp", "tp"))
+    mesh = create_mesh((1, 8, 1), ("dp", "tp", "debug"))
 
     print("Creating sharded model")
     with mesh:

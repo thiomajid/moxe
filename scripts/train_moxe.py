@@ -13,7 +13,6 @@ import grain.python as grain
 import hydra
 import jax
 import jax.numpy as jnp
-import jax.tree_util as jtu
 import optax
 import orbax.checkpoint as ocp
 from einops import rearrange
@@ -34,15 +33,13 @@ from moxe.config import MoxEConfig
 from moxe.inference import GenerationCarry, generate_sequence_scan
 from moxe.modules.model import MoxEForCausalLM
 from moxe.output import (
-    ConditionedGateOutput,
     MoxEForCausalLMOutput,
     MoxEForwardPassOutput,
-    MoxELayerOutput,
 )
 from moxe.tensorboard import TensorBoardLogger
 from moxe.training.arguments import CustomArgs
 from moxe.training.data import DataCollatatorTransform, create_dataloaders
-from moxe.training.helpers import apply_gradients, compute_training_steps
+from moxe.training.helpers import compute_training_steps
 from moxe.utils.array import create_mesh, log_node_devices_stats
 from moxe.utils.modules import (
     checkpoint_post_eval,
@@ -50,27 +47,6 @@ from moxe.utils.modules import (
     load_sharded_checkpoint_state,
 )
 from xlstm_jax.utils import str2dtype
-
-
-def _accumulate_loss(
-    outputs: tp.List[MoxELayerOutput | ConditionedGateOutput],
-    attr: str,
-):
-    """
-    Accumulates a specific loss attribute from a Pytree of layer outputs
-    in a way that is compatible with JAX tracing.
-    """
-
-    leaves_with_paths = jtu.tree_leaves_with_path(outputs)
-    total_loss = jnp.array(
-        [
-            leaf
-            for path, leaf in leaves_with_paths
-            if isinstance(path[-1], jtu.GetAttrKey) and path[-1].name == attr
-        ]
-    ).sum()
-
-    return total_loss
 
 
 def loss_fn(
@@ -194,7 +170,7 @@ def train_step(
         group_loss=aux_data.group_loss,
     )
 
-    return loss, grads, grad_norm, aux_data.layers_output
+    return loss, grad_norm, aux_data.layers_output
 
 
 @partial(
@@ -240,17 +216,24 @@ def eval_step(
 
 @partial(
     nnx.jit,
-    static_argnames=("config_fn", "seed", "mesh", "dtype"),
+    static_argnames=("config_fn", "rngs", "mesh", "dtype", "param_dtype"),
 )
 def _create_sharded_model(
     config_fn: tp.Callable[[], MoxEConfig],
-    seed: int,
+    rngs: nnx.Rngs,
     mesh: Mesh,
-    dtype=jnp.float32,
+    dtype=jnp.bfloat16,
+    param_dtype=jnp.float32,
 ):
-    rngs = nnx.Rngs(seed)
     config = config_fn()
-    model = MoxEForCausalLM(config, mesh=mesh, rngs=rngs, dtype=dtype)
+    model = MoxEForCausalLM(
+        config,
+        mesh=mesh,
+        rngs=rngs,
+        dtype=dtype,
+        param_dtype=param_dtype,
+    )
+
     state = nnx.state(model)
     pspecs = nnx.get_partition_spec(state)
     sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
@@ -260,7 +243,9 @@ def _create_sharded_model(
 
 
 @hydra.main(
-    config_path="./configs", config_name="train_moxe_config", version_base="1.1"
+    config_path="../configs",
+    config_name="train_moxe_config",
+    version_base="1.2",
 )
 def main(cfg: DictConfig):
     # Set up logging
@@ -284,8 +269,8 @@ def main(cfg: DictConfig):
             f"warmup_ratio not found in config, defaulting to {args.warmup_ratio}"
         )
 
-    logger.info("Loading tokenizer...")
     # Load tokenizer
+    logger.info("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer,
         token=args.hub_token,
@@ -313,20 +298,27 @@ def main(cfg: DictConfig):
 
     # Model instance
     dtype_str = cfg["dtype"]
-    logger.info(f"Creating MoxE model with dtype={dtype_str}...")
+    param_dtype_str = cfg["param_dtype"]
+    logger.info(
+        f"Creating MoxE model with param_dtype={param_dtype_str} and dtype={dtype_str}..."
+    )
+
     dtype = str2dtype(dtype_str)
+    param_dtype = str2dtype(param_dtype_str)
 
-    mesh_shape = tuple(args.mesh_shape) if hasattr(args, "mesh_shape") else (1,)
-    axis_names = tuple(args.axis_names) if hasattr(args, "axis_names") else ("dp",)
+    mesh_shape = tuple(args.mesh_shape) if hasattr(args, "mesh_shape") else (1, 1)
+    axis_names = tuple(args.axis_names) if hasattr(args, "axis_names") else ("dp", "tp")
+
     mesh = create_mesh(mesh_shape=mesh_shape, axis_names=axis_names)
-
-    model = None
+    rngs = nnx.Rngs(args.seed)
+    model: MoxEForCausalLM
     with mesh:
         model = _create_sharded_model(
             config_fn=lambda: config,
-            seed=args.seed,
+            rngs=rngs,
             mesh=mesh,
             dtype=dtype,
+            param_dtype=param_dtype,
         )
 
     logger.info(f"Model parameters: {count_parameters(model)}")
@@ -442,7 +434,7 @@ def main(cfg: DictConfig):
         every_k_schedule=args.gradient_accumulation_steps,
     )
 
-    optimizer = nnx.Optimizer(model, optimizer_def)
+    optimizer = nnx.Optimizer(model, optimizer_def, wrt=nnx.Param)
 
     # Metrics
     train_metrics = nnx.MultiMetric(
@@ -470,19 +462,19 @@ def main(cfg: DictConfig):
     tb_logger = TensorBoardLogger(log_dir=args.logging_dir, name="train")
 
     # Checkpoint manager
-    ckpt_dir = Path(args.logging_dir).absolute()
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    CHECKPOINT_DIR = Path(args.logging_dir).absolute()
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
     BEST_METRIC_KEY = "eval_perplexity"
     options = ocp.CheckpointManagerOptions(
-        max_to_keep=3,
+        max_to_keep=args.save_total_limit,
         best_fn=lambda metrics: metrics[BEST_METRIC_KEY],
         best_mode="min",
         create=True,
     )
 
     manager = ocp.CheckpointManager(
-        ckpt_dir,
+        CHECKPOINT_DIR,
         checkpointers=ocp.PyTreeCheckpointer(),
         options=options,
     )
@@ -514,12 +506,12 @@ def main(cfg: DictConfig):
     epoch_durations = []
 
     # Training Loop
-    DATA_SHARDING = NamedSharding(
-        create_mesh(mesh_shape, axis_names),
-        spec=PartitionSpec("dp", None),
+    DATA_SHARDING = NamedSharding(mesh, spec=PartitionSpec("dp", None))
+    GENERATION_SAMPLES = cfg.get(
+        "generation_samples",
+        ["Once upon a time", "There was a girl", "Next to the tree"],
     )
 
-    GENERATION_SAMPLES = ["Once upon a time", "There was a girl", "Next to the tree"]
     MAX_NEW_TOKENS = 100
     GREEDY = False
     TEMPERATURE = 0.85
@@ -557,17 +549,16 @@ def main(cfg: DictConfig):
                 _batch = (input_ids, labels)
 
                 # Compute gradients and metrics
-                loss, grads, grad_norm, layers_outputs = train_step(
+                loss,  grad_norm, layers_output = train_step(
                     model=model,
                     metrics=train_metrics,
                     batch=_batch,
+                    optimizer=optimizer,
                     z_loss_coef=args.z_loss_coef,
                     load_balancing_loss_coef=args.load_balancing_loss_coef,
                     d_loss_coef=args.d_loss_coef,
                     group_loss_coef=args.group_loss_coef,
                 )
-
-                apply_gradients(optimizer, grads)
 
                 # Check if it's time for optimizer step
                 is_update_step = (step + 1) % args.gradient_accumulation_steps == 0
@@ -586,7 +577,7 @@ def main(cfg: DictConfig):
                     for metric, value in computed_metrics.items():
                         tb_logger.log_scalar(f"train/{metric}", value, global_step)
 
-                    tb_logger.write_moe_layers_metrics(layers_outputs, global_step)
+                    tb_logger.write_moe_layers_metrics(layers_output, global_step)
 
                     train_metrics.reset()
 

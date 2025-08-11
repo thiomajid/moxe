@@ -1,9 +1,9 @@
 num_experts: 4
 top_k_experts: 2
-num_layers: 4
-moe_layer_type: "moxe"
+num_layers: 2
+moe_layer_type: "slstm"
 router_type: "conditioned_addition"
-expert_type: "xlstm"
+expert_type: "slstm"
 modulation_bias: "proportional"
 gate_bias: true
 gamma: 0.7
