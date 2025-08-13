@@ -13,7 +13,7 @@ import plotly.graph_objects as go
 from flax.metrics.tensorboard import SummaryWriter
 from PIL import Image
 
-from moxe.output import MoxELayerOutput
+from moxe.output import BaseMoELayerOutput, MoxELayerOutput
 
 
 class TensorBoardLogger:
@@ -27,7 +27,7 @@ class TensorBoardLogger:
             name: Name for this logger instance
         """
         self.log_dir = Path(log_dir)
-        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.log_dir.mkdir(parents=True, exist_ok=False)
         self.name = name
 
         # Create tensorboard writer
@@ -120,18 +120,26 @@ class TensorBoardLogger:
 
     def _write_layer_scalar_metrics(
         self,
-        layer_idx: int,
-        metrics: MoxELayerOutput,
+        index: int,
+        output: MoxELayerOutput | BaseMoELayerOutput,
         step: int,
     ):
-        leaves_with_paths = jtu.tree_leaves_with_path(metrics)
-        data = {
-            f"layer_{layer_idx}/{str(path[-1].name)}": leaf.item()
-            for path, leaf in leaves_with_paths
-            if isinstance(path[-1], jtu.GetAttrKey)
-            and leaf is not None
-            and leaf.size == 1
+        metrics = {
+            "z_loss": output.z_loss[index].item(),
+            "load_balancing_loss": output.load_balancing_loss[index].item(),
         }
+
+        if output.conditioned_output is not None:
+            metrics.update(
+                d_loss=output.conditioned_output.d_loss[index].item(),
+                group_loss=output.conditioned_output.group_loss[index].item(),
+                router_entropy=output.conditioned_output.router_entropy[index].item(),
+                predicted_entropy=output.conditioned_output.predicted_entropy[
+                    index
+                ].item(),
+            )
+
+        data = {f"layer_{index}/{metric}": value for metric, value in metrics.items()}
 
         self.log_scalars(data, step)
 
@@ -222,18 +230,23 @@ class TensorBoardLogger:
             token_dist_img,
         )
 
-    def write_moe_layers_metrics(self, metrics: tp.Tuple[MoxELayerOutput], step: int):
-        for layer_idx, layer_metrics in enumerate(metrics):
-            self._write_layer_scalar_metrics(layer_idx, layer_metrics, step)
+    def write_moe_layers_metrics(
+        self,
+        layers_output: MoxELayerOutput | BaseMoELayerOutput,
+        step: int,
+    ):
+        num_layers = layers_output.z_loss.shape[0]
+        for layer_idx in range(num_layers):
+            self._write_layer_scalar_metrics(layer_idx, layers_output, step)
 
             # (B*S, E) -> (E,)
-            avg_expert_weighting = layer_metrics.router_probs.mean(axis=0)
+            avg_expert_weighting = layers_output.router_probs[layer_idx].mean(axis=0)
 
             # (E,) - Fraction of tokens processed by each expert relative to total tokens
-            expert_load = layer_metrics.expert_load
+            expert_load = layers_output.expert_load[layer_idx]
 
             # (E,) - Absolute count of tokens assigned to each expert
-            token_distribution = layer_metrics.expert_token_counts
+            token_distribution = layers_output.expert_token_counts[layer_idx]
 
             avg_weighting_img, expert_load_img, token_dist_img = (
                 self._plot_expert_usage(

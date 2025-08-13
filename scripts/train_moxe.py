@@ -482,7 +482,7 @@ def main(cfg: DictConfig):
     # Training loop setup
     global_step = 0
     global_optimizer_step = 0
-    latest_eval_metrics_for_ckpt = {BEST_METRIC_KEY: float("inf")}
+    LATEST_EVAL_METRICS_FOR_CHECKPOINT = {BEST_METRIC_KEY: float("inf")}
 
     logger.info("Starting training loop...")
     logger.info(f"Num Epochs = {args.num_train_epochs}")
@@ -549,7 +549,7 @@ def main(cfg: DictConfig):
                 _batch = (input_ids, labels)
 
                 # Compute gradients and metrics
-                loss,  grad_norm, layers_output = train_step(
+                loss, grad_norm, layers_output = train_step(
                     model=model,
                     metrics=train_metrics,
                     batch=_batch,
@@ -590,15 +590,6 @@ def main(cfg: DictConfig):
                     "loss": f"{loss.item():.6f}",
                     "grad_norm": f"{grad_norm.item():.4f}",
                 }
-
-                # Add best metrics
-                if (
-                    BEST_METRIC_KEY in latest_eval_metrics_for_ckpt
-                    and latest_eval_metrics_for_ckpt[BEST_METRIC_KEY] != float("inf")
-                ):
-                    postfix_data["best_loss"] = (
-                        f"{latest_eval_metrics_for_ckpt[BEST_METRIC_KEY]:.6f}"
-                    )
 
                 current_desc = f"Epoch {epoch + 1}/{args.num_train_epochs} (Step {global_step}/{max_steps}, Opt {global_optimizer_step}/{max_optimizer_steps})"
                 pbar.set_description(current_desc)
@@ -727,7 +718,7 @@ def main(cfg: DictConfig):
 
                 key_metric = "loss"
                 if key_metric in final_computed_metrics:
-                    latest_eval_metrics_for_ckpt = {
+                    LATEST_EVAL_METRICS_FOR_CHECKPOINT = {
                         BEST_METRIC_KEY: float(final_computed_metrics[key_metric])
                     }
 
@@ -741,15 +732,15 @@ def main(cfg: DictConfig):
 
                 # Log final auxiliary loss breakdown
                 logger.info("Final Training Metrics:")
-                logger.info(f"  Total Loss: {final_computed_metrics['loss']:.6f}")
-                logger.info(f"  CE Loss: {final_computed_metrics['ce_loss']:.6f}")
-                logger.info(f"  Z Loss: {final_computed_metrics['z_loss']:.6f}")
+                logger.info(f"Total Loss: {final_computed_metrics['loss']:.6f}")
+                logger.info(f"CE Loss: {final_computed_metrics['ce_loss']:.6f}")
+                logger.info(f"Z Loss: {final_computed_metrics['z_loss']:.6f}")
                 logger.info(
                     f"  Load Balancing Loss: {final_computed_metrics['load_balancing_loss']:.6f}"
                 )
-                logger.info(f"  D Loss: {final_computed_metrics['d_loss']:.6f}")
-                logger.info(f"  Group Loss: {final_computed_metrics['group_loss']:.6f}")
-                logger.info(f"  Perplexity: {final_computed_metrics['perplexity']:.4f}")
+                logger.info(f"D Loss: {final_computed_metrics['d_loss']:.6f}")
+                logger.info(f"Group Loss: {final_computed_metrics['group_loss']:.6f}")
+                logger.info(f"Perplexity: {final_computed_metrics['perplexity']:.4f}")
         except Exception as e:
             logger.warning(f"Could not compute final training metrics: {e}")
 
@@ -837,13 +828,13 @@ def main(cfg: DictConfig):
     if global_step > 0:
         final_model_state = nnx.state(model, nnx.Param)
         logger.info(
-            f"Saving final model state at step {global_step} to be considered by CheckpointManager with metrics {latest_eval_metrics_for_ckpt}."
+            f"Saving final model state at step {global_step} to be considered by CheckpointManager with metrics {LATEST_EVAL_METRICS_FOR_CHECKPOINT}."
         )
 
         manager.save(
             global_step,
             final_model_state,
-            metrics=latest_eval_metrics_for_ckpt,
+            metrics=LATEST_EVAL_METRICS_FOR_CHECKPOINT,
         )
         manager.wait_until_finished()
 
