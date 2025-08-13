@@ -27,7 +27,10 @@ class TensorBoardLogger:
             name: Name for this logger instance
         """
         self.log_dir = Path(log_dir)
-        self.log_dir.mkdir(parents=True, exist_ok=False)
+
+        if not self.log_dir.exists():
+            self.log_dir.mkdir(parents=True)
+
         self.name = name
 
         # Create tensorboard writer
