@@ -37,7 +37,9 @@ def _create_sharded_model(
 
 
 @hydra.main(
-    config_path="../configs", config_name="train_moxe_config", version_base="1.1"
+    config_path="../configs",
+    config_name="train_moxe_config",
+    version_base="1.2",
 )
 def main(cfg: DictConfig):
     MAX_NEW_TOKENS = 100

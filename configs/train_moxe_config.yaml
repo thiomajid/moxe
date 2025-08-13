@@ -3,7 +3,8 @@ defaults:
   - trainer: moxe_trainer
   - model: demo_moxe
 
-dtype: "float32"
+dtype: "bfloat16"
+param_dtype: "float32"
 
 # Checkpoint resumption (optional)
 resume_from_checkpoint: false
