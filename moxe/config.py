@@ -1,6 +1,7 @@
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from typing import Optional
 
+from flax import struct
 from omegaconf import DictConfig, OmegaConf
 
 from moxe.output import ModulationBias
@@ -8,7 +9,7 @@ from moxe.utils.parser import parse_xlstm_config_dict
 from xlstm_jax.xlstm_lm_model import xLSTMLMModelConfig
 
 
-@dataclass(unsafe_hash=True, order=True)
+@struct.dataclass(unsafe_hash=True, order=True)
 class MoxEConfig:
     def __init__(
         self,

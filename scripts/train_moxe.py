@@ -216,16 +216,15 @@ def eval_step(
 
 @partial(
     nnx.jit,
-    static_argnames=("config_fn", "rngs", "mesh", "dtype", "param_dtype"),
+    static_argnames=("config", "rngs", "mesh", "dtype", "param_dtype"),
 )
 def _create_sharded_model(
-    config_fn: tp.Callable[[], MoxEConfig],
+    config: MoxEConfig,
     rngs: nnx.Rngs,
     mesh: Mesh,
     dtype=jnp.bfloat16,
     param_dtype=jnp.float32,
 ):
-    config = config_fn()
     model = MoxEForCausalLM(
         config,
         mesh=mesh,
@@ -314,7 +313,7 @@ def main(cfg: DictConfig):
     model: MoxEForCausalLM
     with mesh:
         model = _create_sharded_model(
-            config_fn=lambda: config,
+            config,
             rngs=rngs,
             mesh=mesh,
             dtype=dtype,
