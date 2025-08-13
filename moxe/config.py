@@ -1,7 +1,6 @@
-from dataclasses import asdict
+from dataclasses import dataclass
 from typing import Optional
 
-from flax import struct
 from omegaconf import DictConfig, OmegaConf
 
 from moxe.output import ModulationBias
@@ -9,7 +8,7 @@ from moxe.utils.parser import parse_xlstm_config_dict
 from xlstm_jax.xlstm_lm_model import xLSTMLMModelConfig
 
 
-@struct.dataclass(unsafe_hash=True, order=True)
+@dataclass(unsafe_hash=True, order=True)
 class MoxEConfig:
     num_experts: int = 4
     top_k_experts: int = 2
@@ -26,53 +25,6 @@ class MoxEConfig:
     group_wise_loss: str = "kl_div"
     post_layers_norm: bool = False
     xlstm: Optional[xLSTMLMModelConfig] = None
-
-    def __hash__(self):
-        """Custom hash method to handle nested non-hashable objects."""
-        # Convert xlstm config to a hashable representation
-        xlstm_hash = (
-            hash(str(asdict(self.xlstm))) if self.xlstm is not None else hash(None)
-        )
-
-        # Hash all primitive fields
-        return hash(
-            (
-                self.num_experts,
-                self.top_k_experts,
-                self.num_layers,
-                self.moe_layer_type,
-                self.router_type,
-                self.expert_type,
-                str(self.modulation_bias),  # Convert enum to string for hashing
-                self.gate_bias,
-                self.gamma,
-                self.eps,
-                self.difficulty_threshold,
-                self.ffn_dim,
-                self.group_wise_loss,
-                self.post_layers_norm,
-                xlstm_hash,
-            )
-        )
-
-    def to_dict(self):
-        return {
-            "xlstm": asdict(self.xlstm),
-            "num_experts": self.num_experts,
-            "top_k_experts": self.top_k_experts,
-            "num_layers": self.num_layers,
-            "moe_layer_type": self.moe_layer_type,
-            "router_type": self.router_type,
-            "expert_type": self.expert_type,
-            "modulation_bias": self.modulation_bias,
-            "gate_bias": self.gate_bias,
-            "gamma": self.gamma,
-            "eps": self.eps,
-            "difficulty_threshold": self.difficulty_threshold,
-            "ffn_dim": self.ffn_dim,
-            "group_wise_loss": self.group_wise_loss,
-            "post_layers_norm": self.post_layers_norm,
-        }
 
     @classmethod
     def from_dict(cls, config_dict: dict | DictConfig, **kwargs):
