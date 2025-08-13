@@ -27,6 +27,34 @@ class MoxEConfig:
     post_layers_norm: bool = False
     xlstm: Optional[xLSTMLMModelConfig] = None
 
+    def __hash__(self):
+        """Custom hash method to handle nested non-hashable objects."""
+        # Convert xlstm config to a hashable representation
+        xlstm_hash = (
+            hash(str(asdict(self.xlstm))) if self.xlstm is not None else hash(None)
+        )
+
+        # Hash all primitive fields
+        return hash(
+            (
+                self.num_experts,
+                self.top_k_experts,
+                self.num_layers,
+                self.moe_layer_type,
+                self.router_type,
+                self.expert_type,
+                str(self.modulation_bias),  # Convert enum to string for hashing
+                self.gate_bias,
+                self.gamma,
+                self.eps,
+                self.difficulty_threshold,
+                self.ffn_dim,
+                self.group_wise_loss,
+                self.post_layers_norm,
+                xlstm_hash,
+            )
+        )
+
     def to_dict(self):
         return {
             "xlstm": asdict(self.xlstm),
