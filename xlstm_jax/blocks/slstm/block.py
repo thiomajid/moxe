@@ -1,6 +1,6 @@
 # Copyright (c) NXAI GmbH and its affiliates 2024
 # Korbininan Pöppel
-# Converted to JAX/Flax by Abdoul Majid O. Thiombiano
+# Ported to JAX/Flax by Abdoul Majid O. Thiombiano
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -43,8 +43,6 @@ class sLSTMBlock(xLSTMBlock):
     This specialized block uses sLSTM layer and optionally a feedforward component.
     """
 
-    config_class = sLSTMBlockConfig
-
     def __init__(
         self,
         config: sLSTMBlockConfig,
@@ -67,7 +65,6 @@ class sLSTMBlock(xLSTMBlock):
             _num_blocks=config._num_blocks,
         )
 
-        # Initialize using the parent class constructor
         super().__init__(
             config=xlstm_config,
             mesh=mesh,

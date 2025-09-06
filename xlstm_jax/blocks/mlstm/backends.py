@@ -1,6 +1,6 @@
 # Copyright (c) NXAI GmbH and its affiliates 2024
 # Maximilian Beck, Korbinian Pöppel
-# Converted to JAX/Flax by Abdoul Majid O. Thiombiano
+# Ported to JAX/Flax by Abdoul Majid O. Thiombiano
 import functools
 import math
 import typing as tp
@@ -53,7 +53,7 @@ def parallel_stabilized_simple(
     # forget gate matrix
     log_fgates = jax.nn.log_sigmoid(fgate_preact)  # (B, NH, S, 1)
     ltr = lax.cond(
-        lower_triangular_matrix is None or S != lower_triangular_matrix.shape[0],
+        lower_triangular_matrix is None or S != lower_triangular_matrix.shape[-1],
         lambda: jnp.tril(jnp.ones((S, S), dtype=jnp.bool)),
         lambda: lower_triangular_matrix,
     )
@@ -62,9 +62,9 @@ def parallel_stabilized_simple(
     log_fgates_cumsum = jnp.concatenate(
         [
             jnp.zeros((B, NH, 1, 1), dtype=_dtype),
-            jnp.cumsum(log_fgates, axis=2),
+            jnp.cumsum(log_fgates, axis=-2),
         ],
-        axis=2,
+        axis=-2,
     )  # (B, NH, S+1, 1)
 
     # for each batch/head this is a matrix of shape (S+1, S+1) containing the cumsum of the log forget gate values

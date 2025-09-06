@@ -1,6 +1,7 @@
 # Copyright (c) NXAI GmbH and its affiliates 2024
 # Korbininan Pöppel
-# Converted to JAX/Flax by Abdoul Majid O. Thiombiano
+# Ported to JAX/Flax by Abdoul Majid O. Thiombiano
+import math
 import typing as tp
 from dataclasses import dataclass
 from functools import partial
@@ -34,7 +35,7 @@ class sLSTMLayerConfig(sLSTMCellConfig):
 class sLSTMLayer(nnx.Module):
     """sLSTM layer implementation in JAX/Flax."""
 
-    config_class = sLSTMLayerConfig
+    conv1d: tp.Callable[[jax.Array], jax.Array] | CausalConv1d
 
     def __init__(
         self,
@@ -59,6 +60,10 @@ class sLSTMLayer(nnx.Module):
                     kernel_size=config.conv1d_kernel_size,
                 ),
             )
+        else:
+            self.conv1d = jax.nn.identity
+
+        self.conv_act_fn = jax.nn.swish
 
         # Initialize gate projections using headwise linear layers
         gate_config = LinearHeadwiseExpandConfig(
@@ -70,10 +75,21 @@ class sLSTMLayer(nnx.Module):
         Gate = partial(
             LinearHeadwiseExpand,
             config=gate_config,
-            mesh=mesh,
             rngs=rngs,
             dtype=dtype,
             param_dtype=param_dtype,
+            kernel_init=nnx.with_partitioning(
+                initializer=nnx.initializers.normal(
+                    math.sqrt(2 / 5 / gate_config.in_features)
+                ),
+                sharding=(None, None, "tp"),
+                mesh=mesh,
+            ),
+            bias_init=nnx.with_partitioning(
+                initializer=nnx.initializers.zeros_init(),
+                sharding=("tp",),
+                mesh=mesh,
+            ),
         )
 
         self.fgate = Gate()
@@ -127,30 +143,19 @@ class sLSTMLayer(nnx.Module):
         Returns:
             Output tensor or tuple of output tensor and final states
         """
-        B, S, _ = x.shape
 
-        x_conv = jax.lax.cond(
-            self.conv1d_kernel_size > 0,
-            lambda _x: jax.nn.swish(self.conv1d(_x)),
-            lambda _x: _x,
-            operand=x,
-        )
+        x_conv = self.conv_act_fn(self.conv1d(x))
 
-        # Apply gate projections
         f = self.fgate(x_conv)
         i = self.igate(x_conv)
         z = self.zgate(x)
         o = self.ogate(x)
 
-        # Concatenate gate outputs into a single tensor
         gates_combined = jnp.concatenate([i, f, z, o], axis=-1)
-
-        # Process through sLSTM cell
         y, slstm_state = self.slstm_cell(gates_combined, state=slstm_state)
         y = self.dropout(y)
 
         out = self.group_norm(y)
-        out = out.transpose(0, 2, 1, 3).reshape(B, S, -1)
 
         if return_last_state:
             return out, {"slstm_state": slstm_state}

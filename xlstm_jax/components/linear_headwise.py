@@ -1,14 +1,13 @@
 # Copyright (c) NXAI GmbH and its affiliates 2024
 # Maximilian Beck, Korbininan Pöppel
-# Converted to JAX/Flax by Abdoul Majid O. Thiombiano
+# Ported to JAX/Flax by Abdoul Majid O. Thiombiano
 from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from flax.nnx import initializers
 from flax.nnx.nn import dtypes
-
-from xlstm_jax.components.init import small_init_initializer
 
 
 @dataclass(unsafe_hash=True, order=True)
@@ -46,66 +45,39 @@ class LinearHeadwiseExpand(nnx.Module):
     It only allows integer up-projection factors, i.e. the output dimension is a multiple of the input dimension.
     """
 
-    config_class = LinearHeadwiseExpandConfig
-
     def __init__(
         self,
         config: LinearHeadwiseExpandConfig,
         *,
-        mesh: jax.sharding.Mesh,
         rngs: nnx.Rngs,
         dtype=jnp.bfloat16,
         param_dtype=jnp.float32,
+        kernel_init=initializers.lecun_normal(),
+        bias_init=initializers.zeros_init(),
     ):
         in_features = config.in_features
         num_heads = config.num_heads
         in_features_per_head = in_features // num_heads
         out_features_per_head = config._out_features // num_heads
 
-        self.trainable_kernel = config.trainable_weight
-        self.trainable_bias = config.trainable_bias
         self.num_heads = num_heads
         self.dtype = dtype
         self.param_dtype = param_dtype
 
         self.promote_dtype = dtypes.promote_dtype
 
-        # Create weight parameter
-        self.kernel = nnx.Param(
-            jnp.empty(
-                (num_heads, out_features_per_head, in_features_per_head),
-                dtype=param_dtype,
-            ),
-            # init_fn=jax.nn.initializers.normal(stddev=stddev),
-            init_fn=nnx.with_partitioning(
-                small_init_initializer(in_features_per_head),
-                sharding=(None, None, "tp"),
-                mesh=mesh,
-            ),
-        )
+        kernel_shape = (num_heads, in_features_per_head, out_features_per_head)
+        self.kernel = nnx.Param(kernel_init(rngs.params(), kernel_shape, param_dtype))
 
         # Create bias parameter
         if config.bias:
             self.bias = nnx.Param(
-                jnp.zeros(config._out_features, dtype=param_dtype),
-                init_fn=nnx.with_partitioning(
-                    nnx.initializers.zeros_init(),
-                    sharding=("tp",),
-                    mesh=mesh,
-                ),
+                bias_init(rngs.params(), (config._out_features), param_dtype)
             )
         else:
             self.bias = None
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        """Forward pass for the headwise linear transformation.
-
-        Args:
-            x: Input tensor of shape (..., in_features)
-
-        Returns:
-            Output tensor of shape (..., out_features)
-        """
         shape = x.shape
         x = x.reshape(*shape[:-1], self.num_heads, -1)
 
@@ -113,22 +85,11 @@ class LinearHeadwiseExpand(nnx.Module):
         bias = self.bias.value if self.bias else None
         x, kernel, bias = self.promote_dtype((x, kernel, bias), dtype=self.dtype)
 
-        kernel = jax.lax.cond(
-            self.trainable_kernel,
-            lambda: kernel,
-            lambda: jax.lax.stop_gradient(kernel),
-        )
-
-        x = jnp.einsum("...hd,hod->...ho", x, kernel)
+        # with flax, the kernel is not transposed, out_features is the last dimension
+        x = jnp.einsum("...hd,hdo->...ho", x, kernel)
         x = x.reshape(*shape[:-1], -1)
 
         if bias is not None:
-            bias = jax.lax.cond(
-                self.trainable_bias,
-                lambda: bias,
-                lambda: jax.lax.stop_gradient(bias),
-            )
-
             x = x + bias
 
         return x

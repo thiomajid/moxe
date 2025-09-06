@@ -1,14 +1,13 @@
 # Copyright (c) NXAI GmbH and its affiliates 2023
 # Korbininan Pöppel
-# Converted to JAX/Flax by Abdoul Majid O. Thiombiano
+# Ported to JAX/Flax by Abdoul Majid O. Thiombiano
 
 
 from functools import partial
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
+from jax.sharding import Mesh
 
 
 @partial(jax.jit, static_argnames=("mesh",))
@@ -41,46 +40,41 @@ def slstm_forward_pointwise(
     raw = Wx + Ry + b
 
     # Extract states from the states tensor
-    states_reshaped = states.reshape(4, states.shape[1], -1)
-    # y = states_reshaped[0]  # hidden state
-    c = states_reshaped[1]  # cell state
-    n = states_reshaped[2]  # normalization state
-    m = states_reshaped[3]  # memory state
+    states = states.reshape(4, states.shape[1], -1)
+    # y = states[0]  # hidden state
+    c = states[1]  # cell state
+    n = states[2]  # normalization state
+    m = states[3]  # memory state
 
     # Split the raw activations into the 4 gates
-    raw_reshaped = raw.reshape(raw.shape[0], 4, -1)
-    raw_reshaped = jax.lax.with_sharding_constraint(
-        raw_reshaped,
-        NamedSharding(mesh, P("dp", None, "tp")),
-    )
+    raw = raw.reshape(raw.shape[0], 4, -1)
+    iraw = raw[:, 0]
+    fraw = raw[:, 1]
+    zraw = raw[:, 2]
+    oraw = raw[:, 3]
+    # raw = jax.lax.with_sharding_constraint(
+    #     raw,
+    #     NamedSharding(mesh, P(None, None, "tp")),
+    # )
 
-    with mesh:
-        iraw = jax.lax.with_sharding_constraint(
-            raw_reshaped[:, 0], P("dp", "tp")
-        )  # input gate
+    # with mesh:
+    #     iraw = jax.lax.with_sharding_constraint(raw[:, 0], P("dp", "tp"))  # input gate
 
-        fraw = jax.lax.with_sharding_constraint(
-            raw_reshaped[:, 1], P("dp", "tp")
-        )  # forget gate
-        zraw = jax.lax.with_sharding_constraint(
-            raw_reshaped[:, 2], P("dp", "tp")
-        )  # cell update
-        oraw = jax.lax.with_sharding_constraint(
-            raw_reshaped[:, 3], P("dp", "tp")
-        )  # output gate
+    #     fraw = jax.lax.with_sharding_constraint(raw[:, 1], P("dp", "tp"))  # forget gate
+    #     zraw = jax.lax.with_sharding_constraint(raw[:, 2], P("dp", "tp"))  # cell update
+    #     oraw = jax.lax.with_sharding_constraint(raw[:, 3], P("dp", "tp"))  # output gate
 
-    # Compute logfplusm
     logfplusm = m + jax.nn.log_sigmoid(fraw)
 
-    # Replace conditional with a safe jax-compatible approach
-    # Instead of using if-else based on tensor value, use jnp.where
-    is_n_zero = jnp.all(n == 0.0)
-    mnew = jax.lax.cond(is_n_zero, lambda: iraw, lambda: jnp.maximum(iraw, logfplusm))
+    mnew = jax.lax.cond(
+        jnp.all(n == 0.0),
+        lambda: iraw,
+        lambda: jnp.maximum(iraw, logfplusm),
+    )
 
-    # Compute gate activations
     ogate = jax.nn.sigmoid(oraw)
-    igate = jnp.exp(iraw - mnew)
-    fgate = jnp.exp(logfplusm - mnew)
+    igate = jnp.minimum(jnp.exp(iraw - mnew), jnp.ones_like(iraw))
+    fgate = jnp.minimum(jnp.exp(logfplusm - mnew), jnp.ones_like(iraw))
     cnew = fgate * c + igate * jnp.tanh(zraw)
     nnew = fgate * n + igate
     ynew = ogate * cnew / nnew

@@ -1,6 +1,6 @@
 # Copyright (c) NXAI GmbH and its affiliates 2023
 # Korbininan Pöppel
-# Converted to JAX/Flax by Abdoul Majid O. Thiombiano
+# Ported to JAX/Flax by Abdoul Majid O. Thiombiano
 
 import jax
 import jax.numpy as jnp

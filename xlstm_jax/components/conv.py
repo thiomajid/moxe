@@ -1,8 +1,8 @@
 # Copyright (c) NXAI GmbH and its affiliates 2024
 # Maximilian Beck, Korbinian Pöppel
-# Converted to JAX/Flax by Abdoul Majid O. Thiombiano
+# Ported to JAX/Flax by Abdoul Majid O. Thiombiano
 import typing as tp
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
@@ -16,14 +16,13 @@ class CausalConv1dConfig:
     kernel_size: int = 4
     causal_conv_bias: bool = True
     channel_mixing: bool = False
-    conv1d_kwargs: dict[str, tp.Any] = field(default_factory=dict)
+    # conv1d_kwargs: dict[str, tp.Any] = field(default_factory=dict)
 
     def __post_init__(self):
         assert self.kernel_size >= 0, "kernel_size must be >= 0"
 
 
 class CausalConv1d(nnx.Module):
-    config_class = CausalConv1dConfig
     """
     Implements causal depthwise convolution of a time series tensor.
     Input:  Tensor of shape (B,T,F), i.e. (batch, time, feature)
@@ -64,7 +63,7 @@ class CausalConv1d(nnx.Module):
                 in_features=config.feature_dim,
                 out_features=config.feature_dim,
                 kernel_size=(config.kernel_size,),
-                padding="CAUSAL",
+                padding=(self.pad,),
                 feature_group_count=self.groups,
                 use_bias=config.causal_conv_bias,
                 rngs=rngs,
@@ -82,9 +81,9 @@ class CausalConv1d(nnx.Module):
                 ),
             )
 
-    def __call__(self, x: jax.Array):
-        return jax.lax.cond(
-            self.kernel_size == 0,
-            lambda: x,
-            lambda: self.conv(x),
-        )
+    def __call__(self, x: jax.Array) -> jax.Array:
+        if self.kernel_size > 0:
+            y = self.conv(x)
+            y = y[:, :, -self.pad]
+
+        return x

@@ -1,7 +1,8 @@
 # Copyright (c) NXAI GmbH and its affiliates 2024
 # Maximilian Beck
-# Converted to JAX/Flax by Abdoul Majid O. Thiombiano
+# Ported to JAX/Flax by Abdoul Majid O. Thiombiano
 from dataclasses import dataclass
+from functools import partial
 from typing import Callable, Literal
 
 import jax
@@ -53,8 +54,6 @@ class FeedForwardConfig(UpProjConfigMixin):
 
 
 class GatedFeedForward(nnx.Module):
-    config_class = FeedForwardConfig
-
     def __init__(
         self,
         config: FeedForwardConfig,
@@ -64,19 +63,14 @@ class GatedFeedForward(nnx.Module):
         dtype=jnp.bfloat16,
         param_dtype=jnp.float32,
     ):
-        # Initialize linear layers
-        self.proj_up = nnx.Linear(
-            in_features=config.embedding_dim,
-            out_features=2 * config._proj_up_dim,
+        self.proj_up_dim = config._proj_up_dim
+
+        Linear = partial(
+            nnx.Linear,
             use_bias=config.bias,
             rngs=rngs,
             dtype=dtype,
             param_dtype=param_dtype,
-            kernel_init=nnx.with_partitioning(
-                small_init_initializer(dim=config.embedding_dim),
-                sharding=(None, "tp"),
-                mesh=mesh,
-            ),
             bias_init=nnx.with_partitioning(
                 nnx.initializers.zeros_init(),
                 sharding=("tp",),
@@ -84,23 +78,25 @@ class GatedFeedForward(nnx.Module):
             ),
         )
 
-        self.proj_down = nnx.Linear(
+        # Initialize linear layers
+        self.proj_up = Linear(
+            in_features=config.embedding_dim,
+            out_features=2 * config._proj_up_dim,
+            kernel_init=nnx.with_partitioning(
+                small_init_initializer(dim=config.embedding_dim),
+                sharding=(None, "tp"),
+                mesh=mesh,
+            ),
+        )
+
+        self.proj_down = Linear(
             in_features=config._proj_up_dim,
             out_features=config.embedding_dim,
-            use_bias=config.bias,
-            rngs=rngs,
-            dtype=dtype,
-            param_dtype=param_dtype,
             kernel_init=nnx.with_partitioning(
                 wang_initializer(
                     dim=config.embedding_dim, num_blocks=config._num_blocks
                 ),
                 sharding=(None, "tp"),
-                mesh=mesh,
-            ),
-            bias_init=nnx.with_partitioning(
-                nnx.initializers.zeros_init(),
-                sharding=("tp",),
                 mesh=mesh,
             ),
         )
@@ -114,14 +110,12 @@ class GatedFeedForward(nnx.Module):
         gate_preact, up_proj = jnp.split(
             up_proj_output,
             indices_or_sections=2,
-            # indices_or_sections=[self.config._proj_up_dim],
+            # indices_or_sections=self.proj_up_dim,
             axis=-1,
         )
 
         activated = self.act_fn(gate_preact) * up_proj
-        output = self.proj_down(activated)
-        output = self.dropout(output)
-
+        output = self.dropout(self.proj_down(activated))
         return output
 
 

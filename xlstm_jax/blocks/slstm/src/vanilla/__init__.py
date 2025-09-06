@@ -1,6 +1,6 @@
 # Copyright (c) NXAI GmbH and its affiliates 2023
 # Korbininan Pöppel
-# Converted to JAX/Flax by Abdoul Majid O. Thiombiano
+# Ported to JAX/Flax by Abdoul Majid O. Thiombiano
 
 import functools
 from typing import Callable
@@ -81,15 +81,16 @@ def slstm_forward(
         R_reshaped = jnp.transpose(R, (0, 2, 1)).reshape(
             1, num_heads, head_dim, num_gates_r * head_dim
         )
+
         Ry = jnp.matmul(hidden_reshaped, R_reshaped).reshape(
             batch_dim, num_heads, num_gates_r, head_dim
         )
 
-        Ry = jnp.transpose(Ry, (0, 2, 1, 3)).reshape(batch_dim, -1)
+        Ry_reshaped = jnp.transpose(Ry, (0, 2, 1, 3)).reshape(batch_dim, -1)
 
         new_states, gates = pointwise_forward(
             current_x,
-            Ry,
+            Ry_reshaped,
             b,
             current_states,
             mesh=mesh,

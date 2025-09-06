@@ -1,0 +1,70 @@
+defaults:
+  - _self_
+  - model: "xlstm"
+
+# text generation config
+max_new_tokens: 128
+temperature: 0.65
+greedy: false
+
+# Training configuration
+resume_from_checkpoint: false
+checkpoint_hub_url: "thiomajid/..."
+checkpoint_save_dir: "./artifacts/checkpoints"
+checkpoint_revision: "main"
+upload_message: "Training completed"
+
+trainer:
+  tokenizer: "HuggingFaceTB/SmolLM2-135M"
+  dtype: "bf16"
+  param_dtype: "fp32"
+
+  # Training parameters
+  num_train_epochs: 50
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 4
+
+  # Optimization
+  seed: 42
+  learning_rate: 2e-3
+  weight_decay: 1e-4
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+
+  # Logging and saving
+  logging_steps: 100
+  output_dir: "./artifacts/"
+  logging_dir: "./artifacts/logs/"
+  run_name: "train"
+  best_metric_key: "perplexity"
+  best_n_to_keep: 3
+
+  hub_model_id: "thiomajid/xlstm-tiny-stories"
+  hub_token: null
+  hub_private_repo: false
+  upload_message: "Training completed"
+
+  # Dataset configuration
+  train_dataset_url: "roneneldan/TinyStories"
+  train_subset: null
+  train_split: "train"
+  train_samples: "all"
+
+  eval_dataset_url: "roneneldan/TinyStories"
+  eval_subset: null
+  eval_split: "validation"
+  eval_samples: 1000
+
+  dataloader_drop_last: true
+  dataloader_num_workers: 4
+  worker_buffer_size: 2
+  text_column: "text"
+  use_dataset_cache: true
+  dataset_cache_dir: "./.dataset_cache"
+
+  # array sharding
+  axis_names: ["dp", "tp"]
+  mesh_shape: [1, 8]

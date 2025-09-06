@@ -1,11 +1,15 @@
 # Copyright (c) NXAI GmbH and its affiliates 2024
 # Maximilian Beck
-# Converted to JAX/Flax by Abdoul Majid O. Thiombiano
+# Ported to JAX/Flax by Abdoul Majid O. Thiombiano
+import typing as tp
 from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from flax.nnx.nn.linear import default_embed_init
+
+from xlstm_jax.inference import GenerationMixin
 
 from .components.init import small_init_initializer
 from .xlstm_block_stack import xLSTMBlockStack, xLSTMBlockStackConfig
@@ -17,17 +21,19 @@ class xLSTMLMModelConfig(xLSTMBlockStackConfig):
     tie_weights: bool = False
     weight_decay_on_embedding: bool = False
     add_embedding_dropout: bool = False
-    pad_token_id: int = 1
+    pad_token_id: int = 0
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.slstm_at = tuple(self.slstm_at)
 
 
-class xLSTMLMModel(nnx.Module):
+class xLSTMLMModel(nnx.Module, GenerationMixin):
     """Language model using xLSTM blocks as its backbone.
 
     This model combines token embeddings with an xLSTM block stack
     and a language modeling head for next token prediction.
     """
-
-    config_class = xLSTMLMModelConfig
 
     def __init__(
         self,
@@ -38,6 +44,13 @@ class xLSTMLMModel(nnx.Module):
         dtype=jnp.bfloat16,
         param_dtype=jnp.float32,
     ):
+        super().__init__()
+
+        self.vocab_size = config.vocab_size
+        self.num_blocks = config.num_blocks
+        self.embedding_dim = config.embedding_dim
+        self.pad_token_id = config.pad_token_id
+
         self.xlstm_block_stack = xLSTMBlockStack(
             config=config,
             mesh=mesh,
@@ -53,7 +66,7 @@ class xLSTMLMModel(nnx.Module):
             dtype=dtype,
             param_dtype=param_dtype,
             embedding_init=nnx.with_partitioning(
-                nnx.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0),
+                default_embed_init,
                 sharding=(None, "tp"),
                 mesh=mesh,
             ),
@@ -79,33 +92,26 @@ class xLSTMLMModel(nnx.Module):
             ),
         )
 
+        self.shared_weight: tp.Optional[nnx.Param] = None
         # Create shared embedding parameters if using weight tying
         if config.tie_weights:
             # Create a single shared weight for both embedding and output
             self.shared_weight = nnx.Param(
-                jnp.zeros((config.vocab_size, config.embedding_dim), dtype=param_dtype),
-                init_fn=nnx.with_partitioning(
-                    small_init_initializer(dim=config.embedding_dim),
+                nnx.with_partitioning(
+                    small_init_initializer(dim=config.embedding_dim)(
+                        rngs.params(),
+                        shape=(config.vocab_size, config.embedding_dim),
+                        dtype=param_dtype,
+                    ),
                     sharding=(None, "tp"),
                     mesh=mesh,
                 ),
             )
-        else:
-            self.shared_weight = None
 
         self.tie_weights = config.tie_weights
         self.pad_token_id = config.pad_token_id
 
     def __call__(self, input_ids: jax.Array):
-        """Forward pass through the model.
-
-        Args:
-            idx: Input token indices of shape [B, S]
-
-        Returns:
-            Logits of shape [B, S, vocab_size]
-        """
-
         # Get embedding weights (either shared or dedicated)
         h_t = None
         if self.tie_weights:
@@ -120,7 +126,6 @@ class xLSTMLMModel(nnx.Module):
         h_t = self.embedding_dropout(h_t)
         h_t, _ = self.xlstm_block_stack(h_t)
 
-        # Apply language model head
         logits = None
         if self.tie_weights:
             logits = jnp.matmul(h_t, self.shared_weight.T)

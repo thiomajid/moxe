@@ -1,13 +1,15 @@
 # Copyright (c) NXAI GmbH and its affiliates 2024
 # Maximilian Beck, Korbinian Pöppel
-# Converted to JAX/Flax by Abdoul Majid O. Thiombiano
+# Ported to JAX/Flax by Abdoul Majid O. Thiombiano
 
 
 import typing as tp
 
+import chex
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from flax.nnx import initializers
 from flax.nnx.nn.normalization import _canonicalize_axes, _compute_stats, _normalize
 from flax.typing import Axes, Dtype, Initializer
 from jax.sharding import Mesh
@@ -171,4 +173,75 @@ class MultiHeadLayerNorm(nnx.Module):
 
         # Reshape back to (B, S, NH, DH)
         normed = normed.reshape(B, S, NH, DH).transpose(0, 2, 1, 3)
+        normed = normed.reshape(B, S, -1)
         return normed
+
+
+# newer normalization methods to follow the current design adopted in xLSTM
+def RMSNorm(
+    num_features: int,
+    mesh: Mesh,
+    rngs: nnx.Rngs,
+    use_scale: bool = True,
+    epsilon: float = 1e-5,
+    dtype=jnp.bfloat16,
+    param_dtype=jnp.float32,
+):
+    return nnx.RMSNorm(
+        num_features=num_features,
+        epsilon=epsilon,
+        use_scale=use_scale,
+        rngs=rngs,
+        dtype=dtype,
+        param_dtype=param_dtype,
+        scale_init=nnx.with_partitioning(
+            initializers.ones_init(),
+            sharding=("tp",),
+            mesh=mesh,
+        ),
+    )
+
+
+class MultiHeadRMSNorm(nnx.RMSNorm):
+    def __init__(
+        self,
+        num_features,
+        num_heads: int,
+        *,
+        epsilon=0.000001,
+        dtype=None,
+        param_dtype=jnp.float32,
+        use_scale=True,
+        scale_init=initializers.ones,
+        reduction_axes=-1,
+        feature_axes=-1,
+        axis_name=None,
+        axis_index_groups=None,
+        use_fast_variance=True,
+        rngs,
+    ):
+        self.head_dim = num_features // num_heads
+        self.num_heads = num_heads
+
+        super().__init__(
+            num_features,
+            epsilon=epsilon,
+            dtype=dtype,
+            param_dtype=param_dtype,
+            use_scale=use_scale,
+            scale_init=scale_init,
+            reduction_axes=reduction_axes,
+            feature_axes=feature_axes,
+            axis_name=axis_name,
+            axis_index_groups=axis_index_groups,
+            use_fast_variance=use_fast_variance,
+            rngs=rngs,
+        )
+
+    def __call__(self, x: jax.Array, mask=None):
+        B, S, NH, HD = x.shape
+        chex.assert_equal(NH, self.num_heads)
+        chex.assert_equal(self.head_dim, HD)
+        y = super().__call__(x, mask)
+
+        return y.reshape(B, S, -1)

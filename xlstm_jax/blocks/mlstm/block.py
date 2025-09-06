@@ -1,6 +1,6 @@
 # Copyright (c) NXAI GmbH and its affiliates 2024
 # Maximilian Beck
-# Converted to JAX/Flax by Abdoul Majid O. Thiombiano
+# Ported to JAX/Flax by Abdoul Majid O. Thiombiano
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -32,8 +32,6 @@ class mLSTMBlock(xLSTMBlock):
     This is a simplified block that only uses the mLSTM layer component
     and not the sLSTM or feedforward components.
     """
-
-    config_class = mLSTMBlockConfig
 
     def __init__(
         self,
