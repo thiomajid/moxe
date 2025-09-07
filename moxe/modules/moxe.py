@@ -40,29 +40,18 @@ class MoxELayer(nnx.Module):
         _block_map = [1, 0]
         mixer_config._block_map = ",".join(map(str, _block_map))
 
-        self.sequence_mixer = xLSTMBlockStack(
-            mixer_config,
+        factory_params = dict(
             mesh=mesh,
             rngs=rngs,
             dtype=dtype,
             param_dtype=param_dtype,
         )
 
-        self.gate = self.__create_router(
-            config,
-            mesh=mesh,
-            rngs=rngs,
-            dtype=dtype,
-            param_dtype=param_dtype,
-        )
+        self.sequence_mixer = xLSTMBlockStack(mixer_config, **factory_params)
 
-        self.experts = get_expert_modules(
-            config,
-            mesh=mesh,
-            rngs=rngs,
-            dtype=dtype,
-            param_dtype=param_dtype,
-        )
+        self.gate = self.__create_router(config, **factory_params)
+
+        self.experts = get_expert_modules(config, **factory_params)
 
     def __create_router(
         self,

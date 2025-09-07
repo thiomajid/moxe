@@ -1,0 +1,6 @@
+defaults:
+  - _self_
+  # - trainer: base
+  - model: demo_moxe
+
+dtype: "float32"

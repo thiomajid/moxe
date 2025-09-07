@@ -19,15 +19,20 @@ from moxe.modules.model import MoxEForCausalLM
 from moxe.utils.modules import count_parameters
 
 
-@partial(nnx.jit, static_argnums=(0, 1))
-def create_sharded_model(mesh: Mesh, config: MoxEConfig):
+@partial(nnx.jit, static_argnums=(0, 1, 2, 3))
+def create_sharded_model(
+    mesh: Mesh,
+    config: MoxEConfig,
+    dtype=jnp.float16,
+    param_dtype=jnp.float32,
+):
     rngs = nnx.Rngs(jax.random.key(123))
     model = MoxEForCausalLM(
         config,
         mesh=mesh,
         rngs=rngs,
-        dtype=jnp.float16,
-        param_dtype=jnp.float32,
+        dtype=dtype,
+        param_dtype=param_dtype,
     )
 
     state = nnx.state(model)
@@ -42,7 +47,7 @@ def create_sharded_model(mesh: Mesh, config: MoxEConfig):
 def main(cfg: DictConfig):
     config = MoxEConfig.from_dict(OmegaConf.to_container(cfg["model"], resolve=True))
     USE_JIT = True
-    model = None
+    model: MoxEForCausalLM
 
     dummy_input = jax.random.randint(
         jax.random.key(123),
@@ -53,21 +58,29 @@ def main(cfg: DictConfig):
 
     print("Creating device mesh")
     mesh = create_mesh((1, 8, 1), ("dp", "tp", "debug"))
+    dtype = jnp.float16
+    param_dtype = jnp.float32
 
     print("Creating sharded model")
     with mesh:
-        model = create_sharded_model(mesh, config)
+        model = create_sharded_model(mesh, config, dtype, param_dtype)
+
+    model.eval()
 
     print(count_parameters(model))
 
-    if USE_JIT:
-        model = nnx.jit(model)
+    # if USE_JIT:
+    #     model = nnx.jit(model)
 
-    output: MoxEForCausalLMOutput = model(
-        dummy_input,
-        compute_d_loss=True,
-        compute_group_loss=True,
-    )
+    @nnx.jit
+    def run(model: MoxEForCausalLM, payload):
+        return model(
+            payload,
+            compute_d_loss=True,
+            compute_group_loss=True,
+        )
+
+    output: MoxEForCausalLMOutput = run(model, dummy_input)
 
     print(output.logits.shape)
     print(output.layers_output.z_loss)

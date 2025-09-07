@@ -84,7 +84,7 @@ class xLSTMBlock(nnx.Module):
             use_scale=True,
             rngs=rngs,
             mesh=mesh,
-            dtype=jnp.float32,
+            dtype=dtype,
             param_dtype=param_dtype,
         )
 
@@ -114,7 +114,7 @@ class xLSTMBlock(nnx.Module):
                 use_scale=True,
                 mesh=mesh,
                 rngs=rngs,
-                dtype=jnp.float32,
+                dtype=dtype,
                 param_dtype=param_dtype,
             )
 

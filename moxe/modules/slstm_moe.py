@@ -43,4 +43,10 @@ class sLSTMMoELayer(xLSTMMoELayer):
             param_dtype=param_dtype,
         )
 
-        self.experts = get_expert_modules(config, mesh=mesh, rngs=rngs, dtype=dtype)
+        self.experts = get_expert_modules(
+            config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )

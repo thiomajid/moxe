@@ -16,21 +16,40 @@ from moxe.output import MoELayerType
 from moxe.tensorboard import TensorBoardLogger
 
 
-@nnx.vmap(in_axes=(None, 0, None, None), out_axes=0)
+@nnx.vmap(in_axes=(None, 0, None, None, None), out_axes=0)
 def _create_moxe_layers(
     config: MoxEConfig,
     rngs: nnx.Rngs,
     mesh: jax.sharding.Mesh,
-    dtype=jnp.float32,
+    dtype=jnp.bfloat16,
+    param_dtype=jnp.float32,
 ):
     layer_type = config.moe_layer_type
 
     if layer_type == MoELayerType.mLSTM:
-        return mLSTMMoELayer(config, mesh=mesh, rngs=rngs, dtype=dtype)
+        return mLSTMMoELayer(
+            config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )
     elif layer_type == MoELayerType.sLSTM:
-        return sLSTMMoELayer(config, mesh=mesh, rngs=rngs, dtype=dtype)
+        return sLSTMMoELayer(
+            config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )
     elif layer_type == MoELayerType.MoxE:
-        return MoxELayer(config, mesh=mesh, rngs=rngs, dtype=dtype)
+        return MoxELayer(
+            config,
+            mesh=mesh,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )
     else:
         raise ValueError(
             f"Unknown MoE layer type: {layer_type}"

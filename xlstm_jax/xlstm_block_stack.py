@@ -204,7 +204,9 @@ class xLSTMBlockStack(nnx.Module):
     ):
         self.num_blocks = config.num_blocks
         self.has_uniform_blocks = (
-            len(config.slstm_at) == 0 or len(config.slstm_at) == config.num_blocks
+            len(config.slstm_at) == 0
+            or len(config.slstm_at) == config.num_blocks
+            or config.slstm_at == "all"
         )
 
         self.blocks = _create_blocks(
@@ -220,7 +222,7 @@ class xLSTMBlockStack(nnx.Module):
                 num_features=config.embedding_dim,
                 rngs=rngs,
                 mesh=mesh,
-                dtype=jnp.float32,
+                dtype=dtype,
                 param_dtype=param_dtype,
             )
             if config.add_post_blocks_norm
@@ -234,12 +236,6 @@ class xLSTMBlockStack(nnx.Module):
         if self.has_uniform_blocks:
             x_t, h_t = _block_scan(self.blocks, x)
         else:
-            # graphdef, state = nnx.split(self.blocks)
-
-            # def _local_block_scan(carry: jax.Array, block_state: nnx.State):
-            #     block = nnx.merge(graphdef, block_state)
-            #     next_state = block(carry)
-            #     return next_state, next_state
 
             def _local_block_scan(carry: jax.Array, block_idx: jax.Array):
                 next_state = jax.lax.switch(
@@ -256,10 +252,6 @@ class xLSTMBlockStack(nnx.Module):
                 # xs=state,
                 xs=jnp.arange(self.num_blocks),
             )
-
-        # for block in self.blocks:
-        #     x_t = block(x_t)
-        #     h_t.append(x_t)
 
         x_t = self.post_blocks_norm(x_t)
 

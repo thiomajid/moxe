@@ -91,7 +91,7 @@ class BiasConditionedGate(nnx.Module):
         self.router = nnx.Linear(
             in_features=config.xlstm.embedding_dim,
             out_features=self.num_experts,
-            use_bias=config.gate_bias,
+            use_bias=False,
             rngs=rngs,
             dtype=dtype,
             param_dtype=param_dtype,

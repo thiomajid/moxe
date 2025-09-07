@@ -3,8 +3,9 @@ import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
 
+from moxe.modules.moxe import MoxELayer
 from moxe.utils.types import get_moe_layer_type
-from xlstm_jax.components.ln import LayerNorm
+from xlstm_jax.components.ln import RMSNorm
 
 from ..config import MoxEConfig
 from ..output import (
@@ -49,16 +50,28 @@ class MoxEModel(nnx.Module):
         )
 
         layer_type = get_moe_layer_type(config.moe_layer_type)
-        self.layers = [
-            layer_type(
+        # self.layers = [
+        #     layer_type(
+        #         config,
+        #         mesh=mesh,
+        #         rngs=rngs,
+        #         dtype=dtype,
+        #         param_dtype=param_dtype,
+        #     )
+        #     for _ in range(config.num_layers)
+        # ]
+
+        @nnx.vmap
+        def _create_layers(rngs: nnx.Rngs):
+            return layer_type(
                 config,
                 mesh=mesh,
                 rngs=rngs,
                 dtype=dtype,
                 param_dtype=param_dtype,
             )
-            for _ in range(config.num_layers)
-        ]
+
+        self.layers = _create_layers(rngs.fork(split=config.num_layers))
 
         self.num_layers = config.num_layers
         self.moe_layer_type = config.moe_layer_type
@@ -72,11 +85,33 @@ class MoxEModel(nnx.Module):
         h_t = self.token_embedding(input_ids)
         h_t = self.embedding_dropout(h_t)
 
-        def _moxe_scan(carry: tuple[jax.Array, bool, bool], layer_idx: jax.Array):
+        carry = (h_t, compute_d_loss, compute_group_loss)
+
+        # def _moxe_scan(carry: tuple[jax.Array, bool, bool], layer_idx: jax.Array):
+        #     state, compute_d_loss, compute_group_loss = carry
+        #     output: BaseMoELayerOutput = jax.lax.switch(
+        #         layer_idx,
+        #         self.layers,
+        #         state,
+        #         compute_d_loss,
+        #         compute_group_loss,
+        #     )
+
+        #     next_state = output.hidden_states
+        #     new_carry = (next_state, compute_d_loss, compute_group_loss)
+        #     return new_carry, output
+
+        # layers_outputs = None
+        # (h_t, _, _), layers_outputs = jax.lax.scan(
+        #     f=_moxe_scan,
+        #     init=carry,
+        #     xs=jnp.arange(self.num_layers),
+        # )
+
+        @nnx.scan(in_axes=(0, nnx.Carry), out_axes=(nnx.Carry, 0))
+        def _layer_scan(layer: MoxELayer, carry: tuple[jax.Array, bool, bool]):
             state, compute_d_loss, compute_group_loss = carry
-            output: BaseMoELayerOutput = jax.lax.switch(
-                layer_idx,
-                self.layers,
+            output: BaseMoELayerOutput = layer(
                 state,
                 compute_d_loss,
                 compute_group_loss,
@@ -86,13 +121,7 @@ class MoxEModel(nnx.Module):
             new_carry = (next_state, compute_d_loss, compute_group_loss)
             return new_carry, output
 
-        layers_outputs = None
-        carry = (h_t, compute_d_loss, compute_group_loss)
-        (h_t, _, _), layers_outputs = jax.lax.scan(
-            f=_moxe_scan,
-            init=carry,
-            xs=jnp.arange(self.num_layers),
-        )
+        (h_t, _, _), layers_outputs = _layer_scan(self.layers, carry)
 
         return MoxEModelOutput(hidden_states=h_t, layers_output=layers_outputs)
 
@@ -116,9 +145,8 @@ class MoxEForCausalLM(nnx.Module):
         )
 
         self.norm = (
-            LayerNorm(
+            RMSNorm(
                 config.xlstm.embedding_dim,
-                use_bias=False,
                 mesh=mesh,
                 rngs=rngs,
                 dtype=dtype,
